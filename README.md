@@ -21,9 +21,9 @@ Built because the existing options have reliability problems. Designed to be the
 
 ---
 
-## Why not mem0?
+## Why clawd-remember?
 
-The `@mem0/openclaw-mem0` plugin has [known issues](https://github.com/mem0ai/mem0/issues/4727) with pgvector in OSS mode — recall timeouts, PostHog telemetry blocking async operations, and client connection bugs. clawd-remember was built to solve exactly these problems with a simpler, more reliable architecture.
+Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to self-host reliably. clawd-remember takes a different approach: a minimal, auditable codebase with no telemetry, no unnecessary dependencies, and storage backends that are easy to run and maintain.
 
 ---
 
