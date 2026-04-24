@@ -173,5 +173,3 @@ MIT — see [LICENSE](LICENSE)
 ## Credits
 
 Built by [Chris Coveyduck](https://github.com/chriscoveyduck) with [Skippy the Magnificent](https://openclaw.ai) 🎩
-
-Inspired by the frustration of `@mem0/openclaw-mem0` not working reliably in OSS mode.
