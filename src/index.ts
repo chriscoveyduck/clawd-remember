@@ -1,3 +1,5 @@
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry"
+
 import { MemoryManager } from "./memory.js"
 import { OllamaEmbedder } from "./embedders/ollama.js"
 import { OpenAICompatibleExtractor } from "./extractors/openai.js"
@@ -5,39 +7,18 @@ import { SqliteStorageProvider } from "./storage/sqlite.js"
 import type { Embedder, LLMExtractor, Message, PluginConfig, RecallOptions, StorageProvider } from "./types.js"
 import { withTimeout } from "./utils.js"
 
-type HookContext = {
-  config?: PluginConfig
-  logger?: {
-    warn?: (...args: unknown[]) => void
-  }
-  state?: Record<string, unknown>
-  input?: string
-  prompt?: string
-  messages?: Message[]
-  conversation?: Message[]
-  userId?: string
-  sessionId?: string
+type LoggerLike = {
+  warn?: (message: string) => void
 }
 
-type ToolContext = HookContext
-
-type PluginTool = {
-  name: string
-  description: string
-  input_schema: Record<string, unknown>
-  execute: (input: Record<string, unknown>, context: ToolContext) => Promise<unknown>
+type RuntimeContext = {
+  logger?: LoggerLike
+  sessionKey?: string
 }
 
-type PluginEntry = {
-  name: string
-  slot: "memory"
-  configSchema: Record<string, unknown>
-  hooks: {
-    before_prompt_build: (context: HookContext) => Promise<HookContext>
-    after_agent_turn: (context: HookContext) => Promise<HookContext>
-  }
-  tools: PluginTool[]
-}
+type ToolContext = RuntimeContext
+
+type ToolInput = Record<string, unknown>
 
 type PluginDependencies = {
   createStorageProvider?: (config: PluginConfig) => StorageProvider
@@ -45,31 +26,15 @@ type PluginDependencies = {
   createExtractor?: (config: PluginConfig) => LLMExtractor
 }
 
-type DefinePluginEntry = <T>(entry: T) => T
-
-let definePluginEntry: DefinePluginEntry = <T>(entry: T) => entry
-try {
-  const openclaw = await import("openclaw")
-  if (typeof (openclaw as { definePluginEntry?: unknown }).definePluginEntry === "function") {
-    definePluginEntry = openclaw.definePluginEntry as DefinePluginEntry
-  }
-} catch {
-  // Build and test without the OpenClaw runtime installed.
-}
-
-const managers = new Map<string, Promise<MemoryManager>>()
-
-async function getManager(context: HookContext, dependencies: PluginDependencies = {}): Promise<MemoryManager> {
-  const config = normalizeConfig(context.config)
-  const key = JSON.stringify(config)
-  const existing = managers.get(key)
-  if (existing) {
-    return existing
-  }
-
-  const managerPromise = createManager(config, dependencies)
-  managers.set(key, managerPromise)
-  return managerPromise
+type LegacyHookContext = {
+  config?: PluginConfig
+  logger?: LoggerLike
+  prompt?: string
+  input?: string
+  messages?: Message[]
+  conversation?: Message[]
+  userId?: string
+  sessionId?: string
 }
 
 async function createManager(config: PluginConfig, dependencies: PluginDependencies = {}): Promise<MemoryManager> {
@@ -94,27 +59,19 @@ function createStorageProvider(config: PluginConfig): SqliteStorageProvider {
   throw new Error(`Storage provider ${config.storage.provider} is not implemented yet`)
 }
 
-function warn(context: HookContext, scope: string, error: unknown): void {
-  const logger = context.logger
+function warn(context: RuntimeContext | undefined, scope: string, error: unknown): void {
+  const logger = context?.logger
   const message = error instanceof Error ? error.message : String(error)
   logger?.warn?.(`[clawd-remember] ${scope}: ${message}`)
 }
 
-async function safeRun<T>(context: HookContext, scope: string, fn: () => Promise<T>, fallback: T): Promise<T> {
+async function safeRun<T>(context: RuntimeContext | undefined, scope: string, fn: () => Promise<T>, fallback: T): Promise<T> {
   try {
     return await fn()
   } catch (error) {
     warn(context, scope, error)
     return fallback
   }
-}
-
-function getConversation(context: HookContext): Message[] {
-  return context.conversation ?? context.messages ?? []
-}
-
-function getPromptText(context: HookContext): string {
-  return context.prompt ?? context.input ?? ""
 }
 
 function formatMemories(memories: Awaited<ReturnType<MemoryManager["recall"]>>): string {
@@ -126,6 +83,68 @@ function formatMemories(memories: Awaited<ReturnType<MemoryManager["recall"]>>):
     "Relevant memory:",
     ...memories.map((item) => `- ${item.fact.data}`),
   ].join("\n")
+}
+
+function normalizeContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content
+  }
+
+  if (!Array.isArray(content)) {
+    return ""
+  }
+
+  return content
+    .map((block) => {
+      if (typeof block === "string") {
+        return block
+      }
+
+      if (!block || typeof block !== "object") {
+        return ""
+      }
+
+      const text = "text" in block ? block.text : undefined
+      return typeof text === "string" ? text : ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+function normalizeMessages(messages: unknown): Message[] {
+  if (!Array.isArray(messages)) {
+    return []
+  }
+
+  return messages.flatMap((message) => {
+    if (!message || typeof message !== "object") {
+      return []
+    }
+
+    const role = "role" in message && typeof message.role === "string" ? message.role : "user"
+    const content = normalizeContent("content" in message ? message.content : undefined)
+    if (!content.trim()) {
+      return []
+    }
+
+    return [{ role, content }]
+  })
+}
+
+function resolveUserId(context: RuntimeContext | undefined, config: PluginConfig, override?: unknown): string {
+  if (typeof override === "string" && override.trim()) {
+    return override
+  }
+
+  return context?.sessionKey ?? config.userId
+}
+
+function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, override?: unknown): string {
+  if (typeof override === "string" && override.trim()) {
+    return override
+  }
+
+  return context.userId ?? config.userId
 }
 
 function normalizeConfig(config?: PluginConfig): PluginConfig {
@@ -169,119 +188,6 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     captureTimeout: config?.captureTimeout ?? 15_000,
     categories: config?.categories,
   }
-}
-
-function createBeforePromptBuild(dependencies: PluginDependencies = {}) {
-  return async function handleRecall(context: HookContext): Promise<HookContext> {
-  const config = normalizeConfig(context.config)
-  if (!config.autoRecall) {
-    return context
-  }
-
-  return safeRun(context, "before_prompt_build", async () => {
-    const prompt = getPromptText(context)
-    if (!prompt.trim()) {
-      return context
-    }
-
-    const manager = await getManager({ ...context, config }, dependencies)
-    const memories = await withTimeout(
-      manager.recall(prompt, {
-        topK: config.topK,
-        user_id: context.userId ?? config.userId,
-        session_id: context.sessionId ?? config.sessionId,
-      }),
-      config.recallTimeout ?? 10_000,
-      "memory recall",
-    )
-
-    const memoryBlock = formatMemories(memories)
-    if (!memoryBlock) {
-      return context
-    }
-
-    return {
-      ...context,
-      prompt: [memoryBlock, getPromptText(context)].filter(Boolean).join("\n\n"),
-      state: {
-        ...context.state,
-        clawdRememberRecall: memories,
-      },
-    }
-  }, context)
-}
-}
-
-function createAfterAgentTurn(dependencies: PluginDependencies = {}) {
-  return async function handleCapture(context: HookContext): Promise<HookContext> {
-  const config = normalizeConfig(context.config)
-  if (!config.autoCapture) {
-    return context
-  }
-
-  return safeRun(context, "after_agent_turn", async () => {
-    const conversation = getConversation(context)
-    if (!conversation.length) {
-      return context
-    }
-
-    const manager = await getManager({ ...context, config }, dependencies)
-    await withTimeout(
-      manager.capture(conversation, {
-        userId: context.userId ?? config.userId,
-        sessionId: context.sessionId ?? config.sessionId,
-        categories: config.categories,
-      }),
-      config.captureTimeout ?? 15_000,
-      "memory capture",
-    )
-    return context
-  }, context)
-}
-}
-
-function createSearchTool(dependencies: PluginDependencies = {}) {
-  return async function runSearchTool(input: Record<string, unknown>, context: ToolContext): Promise<unknown> {
-  const config = normalizeConfig(context.config)
-  return safeRun(context, "memory_search tool", async () => {
-    const manager = await getManager({ ...context, config }, dependencies)
-    return manager.search(String(input.query ?? ""), {
-      topK: typeof input.topK === "number" ? input.topK : config.topK,
-      user_id: String(input.userId ?? context.userId ?? config.userId),
-      session_id: typeof input.sessionId === "string" ? input.sessionId : context.sessionId ?? config.sessionId,
-      categories: Array.isArray(input.categories)
-        ? input.categories.filter((item): item is string => typeof item === "string")
-        : undefined,
-    } satisfies RecallOptions)
-  }, [])
-}
-}
-
-function createAddTool(dependencies: PluginDependencies = {}) {
-  return async function runAddTool(input: Record<string, unknown>, context: ToolContext): Promise<unknown> {
-  const config = normalizeConfig(context.config)
-  return safeRun(context, "memory_add tool", async () => {
-    const manager = await getManager({ ...context, config }, dependencies)
-    return manager.add(
-      String(input.text ?? ""),
-      String(input.userId ?? context.userId ?? config.userId),
-      typeof input.sessionId === "string" ? input.sessionId : context.sessionId ?? config.sessionId,
-      Array.isArray(input.categories)
-        ? input.categories.filter((item): item is string => typeof item === "string")
-        : config.categories,
-    )
-  }, null)
-}
-}
-
-function createDeleteTool(dependencies: PluginDependencies = {}) {
-  return async function runDeleteTool(input: Record<string, unknown>, context: ToolContext): Promise<unknown> {
-  return safeRun(context, "memory_delete tool", async () => {
-    const manager = await getManager(context, dependencies)
-    await manager.delete(String(input.id ?? ""))
-    return { deleted: true }
-  }, { deleted: false })
-}
 }
 
 export const configSchema = {
@@ -361,66 +267,253 @@ export const configSchema = {
   additionalProperties: false,
 } as const
 
-export function createPlugin(dependencies: PluginDependencies = {}): PluginEntry {
+function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dependencies: PluginDependencies = {}) {
+  let managerPromise: Promise<MemoryManager> | null = null
+
+  function getManager(): Promise<MemoryManager> {
+    if (!managerPromise) {
+      managerPromise = createManager(config, dependencies)
+    }
+    return managerPromise
+  }
+
+  async function search(input: ToolInput, ctx: ToolContext = {}) {
+    return safeRun({ ...ctx, logger }, "memory_search tool", async () => {
+      const manager = await getManager()
+      return manager.search(String(input.query ?? ""), {
+        topK: typeof input.topK === "number" ? input.topK : config.topK,
+        user_id: resolveUserId(ctx, config, input.userId),
+        session_id: typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
+        categories: Array.isArray(input.categories)
+          ? input.categories.filter((item): item is string => typeof item === "string")
+          : undefined,
+      } satisfies RecallOptions)
+    }, [])
+  }
+
+  async function add(input: ToolInput, ctx: ToolContext = {}) {
+    return safeRun({ ...ctx, logger }, "memory_add tool", async () => {
+      const manager = await getManager()
+      return manager.add(
+        String(input.text ?? ""),
+        resolveUserId(ctx, config, input.userId),
+        typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
+        Array.isArray(input.categories)
+          ? input.categories.filter((item): item is string => typeof item === "string")
+          : config.categories,
+      )
+    }, null)
+  }
+
+  async function remove(input: ToolInput, ctx: ToolContext = {}) {
+    return safeRun({ ...ctx, logger }, "memory_delete tool", async () => {
+      const manager = await getManager()
+      await manager.delete(String(input.id ?? ""))
+      return { deleted: true }
+    }, { deleted: false })
+  }
+
+  async function beforePromptBuild(event: { prompt?: string }, ctx: RuntimeContext = {}) {
+    if (!config.autoRecall) {
+      return
+    }
+
+    return safeRun({ ...ctx, logger }, "before_prompt_build", async () => {
+      if (!event.prompt || event.prompt.length < 5) {
+        return
+      }
+
+      const manager = await getManager()
+      const memories = await withTimeout(
+        manager.recall(event.prompt, {
+          topK: config.topK ?? 10,
+          user_id: resolveUserId(ctx, config),
+          session_id: ctx?.sessionKey ?? config.sessionId,
+        }),
+        config.recallTimeout ?? 10_000,
+        "memory recall",
+      )
+
+      const block = formatMemories(memories)
+      if (!block) {
+        return
+      }
+
+      return { prependSystemContext: block }
+    }, undefined)
+  }
+
+  async function agentEnd(event: { messages?: unknown }, ctx: RuntimeContext = {}) {
+    if (!config.autoCapture) {
+      return
+    }
+
+    return safeRun({ ...ctx, logger }, "agent_end", async () => {
+      const messages = normalizeMessages(event.messages)
+      if (!messages.length) {
+        return
+      }
+
+      const manager = await getManager()
+      await withTimeout(
+        manager.capture(messages, {
+          userId: resolveUserId(ctx, config),
+          sessionId: ctx?.sessionKey ?? config.sessionId,
+          categories: config.categories,
+        }),
+        config.captureTimeout ?? 15_000,
+        "memory capture",
+      )
+    }, undefined)
+  }
+
   return {
-    name: "clawd-remember",
-    slot: "memory",
-    configSchema,
+    search,
+    add,
+    remove,
+    beforePromptBuild,
+    agentEnd,
+  }
+}
+
+export function createPlugin(dependencies: PluginDependencies = {}) {
+  const runtimes = new Map<string, ReturnType<typeof createRuntime>>()
+
+  function getRuntime(context: LegacyHookContext) {
+    const config = normalizeConfig(context.config)
+    const key = JSON.stringify(config)
+    const existing = runtimes.get(key)
+    if (existing) {
+      return { config, runtime: existing }
+    }
+
+    const runtime = createRuntime(config, context.logger, dependencies)
+    runtimes.set(key, runtime)
+    return { config, runtime }
+  }
+
+  return {
     hooks: {
-      before_prompt_build: createBeforePromptBuild(dependencies),
-      after_agent_turn: createAfterAgentTurn(dependencies),
+      async before_prompt_build(context: LegacyHookContext) {
+        const { runtime } = getRuntime(context)
+        const result = await runtime.beforePromptBuild(
+          { prompt: context.prompt ?? context.input },
+          { logger: context.logger, sessionKey: context.sessionId },
+        )
+        if (!result?.prependSystemContext) {
+          return context
+        }
+
+        return {
+          ...context,
+          prompt: [result.prependSystemContext, context.prompt ?? context.input ?? ""].filter(Boolean).join("\n\n"),
+        }
+      },
+      async after_agent_turn(context: LegacyHookContext) {
+        const { runtime } = getRuntime(context)
+        await runtime.agentEnd(
+          { messages: context.conversation ?? context.messages ?? [] },
+          { logger: context.logger, sessionKey: context.sessionId },
+        )
+        return context
+      },
     },
     tools: [
       {
         name: "memory_search",
-        description: "Search stored memories for the current user.",
-        input_schema: {
-          type: "object",
-          required: ["query"],
-          properties: {
-            query: { type: "string" },
-            topK: { type: "number" },
-            userId: { type: "string" },
-            sessionId: { type: "string" },
-            categories: { type: "array", items: { type: "string" } },
-          },
+        async execute(input: ToolInput, context: LegacyHookContext) {
+          const { runtime } = getRuntime(context)
+          return runtime.search(input, { logger: context.logger, sessionKey: context.sessionId })
         },
-        execute: createSearchTool(dependencies),
       },
       {
         name: "memory_add",
-        description: "Persist a new memory fact.",
-        input_schema: {
-          type: "object",
-          required: ["text"],
-          properties: {
-            text: { type: "string" },
-            userId: { type: "string" },
-            sessionId: { type: "string" },
-            categories: { type: "array", items: { type: "string" } },
-          },
+        async execute(input: ToolInput, context: LegacyHookContext) {
+          const { runtime } = getRuntime(context)
+          return runtime.add(input, { logger: context.logger, sessionKey: context.sessionId })
         },
-        execute: createAddTool(dependencies),
       },
       {
         name: "memory_delete",
-        description: "Delete a memory by id.",
-        input_schema: {
-          type: "object",
-          required: ["id"],
-          properties: {
-            id: { type: "string" },
-          },
+        async execute(input: ToolInput, context: LegacyHookContext) {
+          const { runtime } = getRuntime(context)
+          return runtime.remove(input, { logger: context.logger, sessionKey: context.sessionId })
         },
-        execute: createDeleteTool(dependencies),
       },
     ],
   }
 }
 
-const plugin = createPlugin()
+export default definePluginEntry({
+  id: "clawd-remember",
+  name: "clawd-remember",
+  description: "Self-hosted memory plugin using Postgres/SQLite + Ollama",
+  register(api) {
+    const cfg = normalizeConfig(api.config as PluginConfig)
+    const logger = api.logger
+    const runtime = createRuntime(cfg, logger)
 
-export default definePluginEntry(plugin)
+    api.registerTool({
+      name: "memory_search",
+      description: "Search stored memories",
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        properties: {
+          query: { type: "string" },
+          topK: { type: "number" },
+          userId: { type: "string" },
+          sessionId: { type: "string" },
+          categories: { type: "array", items: { type: "string" } },
+        },
+      },
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
+        return runtime.search((input ?? {}) as ToolInput)
+      },
+    } as unknown as Parameters<typeof api.registerTool>[0])
+
+    api.registerTool({
+      name: "memory_add",
+      description: "Add a memory",
+      inputSchema: {
+        type: "object",
+        required: ["text"],
+        properties: {
+          text: { type: "string" },
+          userId: { type: "string" },
+          sessionId: { type: "string" },
+          categories: { type: "array", items: { type: "string" } },
+        },
+      },
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
+        return runtime.add((input ?? {}) as ToolInput)
+      },
+    } as unknown as Parameters<typeof api.registerTool>[0])
+
+    api.registerTool({
+      name: "memory_delete",
+      description: "Delete a memory by id",
+      inputSchema: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          id: { type: "string" },
+        },
+      },
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
+        return runtime.remove((input ?? {}) as ToolInput)
+      },
+    } as unknown as Parameters<typeof api.registerTool>[0])
+
+    api.on("before_prompt_build", async (event, ctx) => {
+      return runtime.beforePromptBuild(event, ctx)
+    })
+
+    api.on("agent_end", async (event, ctx) => {
+      return runtime.agentEnd(event, ctx)
+    })
+  },
+})
 
 export * from "./types.js"
 export * from "./memory.js"
