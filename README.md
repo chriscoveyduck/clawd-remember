@@ -4,7 +4,7 @@
 
 **clawd-remember** is an open-source memory plugin for [OpenClaw](https://openclaw.ai) that gives your AI agent persistent, searchable long-term memory — without the instability, telemetry overhead, and mystery timeouts of other solutions.
 
-Built because the existing options were a shitshow. Designed to be the one that isn't.
+Built because the existing options have reliability problems. Designed to be the one that doesn't.
 
 ---
 
