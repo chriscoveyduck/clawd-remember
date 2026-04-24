@@ -33,7 +33,7 @@ clawd-remember is an OpenClaw memory plugin with a layered, provider-based archi
 ### Facts
 A fact is a discrete, third-person statement extracted from a conversation:
 - `"User's blog project uses Astro 6 on Cloudflare Workers"`
-- `"User fixed hydration error in Yosemite project by disabling SSR for that component"`
+- `"User fixed hydration error in blog project by disabling SSR for that component"`
 
 Facts are the unit of storage and retrieval.
 
