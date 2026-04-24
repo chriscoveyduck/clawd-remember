@@ -78,6 +78,6 @@ describe("plugin entry", () => {
     await addTool?.execute({ text: "User likes tea" }, { config, logger: { warn: jest.fn() } })
     const results = await searchTool?.execute({ query: "tea" }, { config, logger: { warn: jest.fn() } }) as Array<{ fact: { data: string } }>
 
-    expect(results[0]?.fact.data).toBe("Fact: User likes tea")
+    expect(results[0]?.fact.data).toBe("User likes tea")
   })
 })
