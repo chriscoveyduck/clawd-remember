@@ -11,9 +11,9 @@ Built because the existing options have reliability problems. Designed to be the
 ## Features
 
 - 🔍 **Semantic search** — query memories by meaning, not just keywords
-- 🗄️ **Pluggable storage** — SQLite (default), MariaDB, or PostgreSQL
-- 🧠 **Pluggable embedders** — Ollama, OpenAI, or any OpenAI-compatible endpoint
-- 🤖 **Pluggable LLM extraction** — any OpenAI-compatible LLM for fact extraction
+- 🗄️ **Pluggable storage** — SQLite today, MariaDB next
+- 🧠 **Ollama embeddings** — local embedding generation with configurable endpoint and model
+- 🤖 **OpenAI-compatible fact extraction** — use any compatible chat completion API
 - 🔒 **Fully self-hosted** — your data never leaves your server
 - ⚡ **No telemetry** — zero phone-home, ever
 - 🧩 **OpenClaw memory slot compatible** — drop-in replacement for `openclaw-mem0`
@@ -30,7 +30,7 @@ Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to
 ## Quick Start
 
 ```bash
-npm install clawd-remember
+npm install clawd-remember better-sqlite3 sqlite-vec
 ```
 
 Add to your `openclaw.json`:
@@ -48,7 +48,7 @@ Add to your `openclaw.json`:
           "storage": {
             "provider": "sqlite",
             "config": {
-              "path": "~/.openclaw/memory.db"
+              "path": "~/.openclaw/clawd-remember.db"
             }
           },
           "embedder": {
@@ -66,7 +66,10 @@ Add to your `openclaw.json`:
               "apiKey": "dummy"
             }
           }
-        }
+        },
+        "topK": 10,
+        "recallTimeout": 10000,
+        "captureTimeout": 15000
       }
     },
     "slots": {
@@ -86,21 +89,37 @@ Add to your `openclaw.json`:
 |----------|-------------|------------|
 | `sqlite` | Embedded SQLite with sqlite-vec extension | `better-sqlite3`, `sqlite-vec` |
 | `mariadb` | MariaDB / MySQL with vector support | `mysql2` |
-| `postgres` | PostgreSQL with pgvector | `pg` |
 
 ### Embedder Providers
 
 | Provider | Description |
 |----------|-------------|
 | `ollama` | Local Ollama instance |
-| `openai` | OpenAI or any OpenAI-compatible endpoint |
 
 ### LLM Providers
 
 | Provider | Description |
 |----------|-------------|
 | `openai-compatible` | Any OpenAI-compatible API (Copilot proxy, Ollama, etc.) |
-| `openai` | OpenAI directly |
+
+### Core Options
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `userId` | `default` | Owner id for stored facts |
+| `sessionId` | unset | Optional session-scoped memory id |
+| `autoRecall` | `true` | Inject relevant memories before prompt build |
+| `autoCapture` | `true` | Extract and store facts after each agent turn |
+| `topK` | `10` | Number of memories returned for recall/search |
+| `recallTimeout` | `10000` | Timeout in milliseconds for recall |
+| `captureTimeout` | `15000` | Timeout in milliseconds for capture |
+| `categories` | unset | Optional tags applied to captured/manual facts |
+
+### Notes
+
+- `better-sqlite3` is an optional dependency. If it is missing, the plugin throws a helpful install error when SQLite storage is initialized.
+- All hook and tool operations are wrapped defensively so memory failures log warnings instead of crashing the agent turn.
+- MariaDB is declared in the config schema for forward compatibility, but `v0.1.0` only implements the SQLite backend.
 
 ---
 
@@ -146,17 +165,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Roadmap
 
-- [ ] SQLite + sqlite-vec storage backend
-- [ ] MariaDB storage backend  
-- [ ] Ollama embedder
-- [ ] OpenAI-compatible embedder
-- [ ] OpenAI-compatible LLM extractor
-- [ ] Auto-recall (inject memories before agent turn)
-- [ ] Auto-capture (extract facts after agent turn)
-- [ ] `memory_search` tool
-- [ ] `memory_add` tool
-- [ ] `memory_delete` tool
-- [ ] Session-scoped vs long-term memory
+- [x] SQLite + sqlite-vec storage backend
+- [ ] MariaDB storage backend
+- [x] Ollama embedder
+- [x] OpenAI-compatible LLM extractor
+- [x] Auto-recall (inject memories before agent turn)
+- [x] Auto-capture (extract facts after agent turn)
+- [x] `memory_search` tool
+- [x] `memory_add` tool
+- [x] `memory_delete` tool
+- [x] Session-scoped vs long-term memory
 - [ ] PostgreSQL storage backend
 - [ ] Memory consolidation / deduplication
 - [ ] Cross-project fact linking

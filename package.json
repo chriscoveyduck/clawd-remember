@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "test": "npm run build && node --experimental-vm-modules node_modules/.bin/jest --runInBand",
     "lint": "eslint src/",
     "dev": "tsc --watch"
   },
@@ -38,7 +38,8 @@
     "openclaw": ">=2026.1.0"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^9.0.0",
+    "better-sqlite3": "^9.6.0",
+    "sqlite-vec": "^0.1.9",
     "mysql2": "^3.0.0",
     "pg": "^8.0.0"
   },
