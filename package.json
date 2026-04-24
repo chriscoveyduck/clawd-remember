@@ -1,0 +1,52 @@
+{
+  "name": "clawd-remember",
+  "version": "0.1.0",
+  "description": "A lightweight, reliable, OpenClaw-native memory plugin. Pluggable storage (SQLite, MariaDB, Postgres), embedders (Ollama, OpenAI), and LLM extractors. No telemetry. Actually works.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "lint": "eslint src/",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "ai-agent",
+    "llm",
+    "vector-search",
+    "sqlite",
+    "ollama",
+    "plugin"
+  ],
+  "author": "Chris Coveyduck <chris@anthillmob.net>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chriscoveyduck/clawd-remember.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chriscoveyduck/clawd-remember/issues"
+  },
+  "homepage": "https://github.com/chriscoveyduck/clawd-remember#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^9.0.0",
+    "mysql2": "^3.0.0",
+    "pg": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.0.0",
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.0.0",
+    "jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
