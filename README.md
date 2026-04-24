@@ -172,4 +172,4 @@ MIT — see [LICENSE](LICENSE)
 
 ## Credits
 
-Built by [Chris Coveyduck](https://github.com/chriscoveyduck) with a little help from an AI assistant.
+Built by [Chris Coveyduck](https://github.com/chriscoveyduck) with [Skippy the Magnificent](https://openclaw.ai) 🎩.
