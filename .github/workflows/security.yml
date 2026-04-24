@@ -15,7 +15,7 @@ jobs:
           node-version: 20.x
           cache: 'npm'
       - run: npm ci
-      - run: npm audit --audit-level=moderate
+      - run: npm audit --audit-level=high
 
   codeql:
     name: CodeQL Analysis
@@ -43,4 +43,4 @@ jobs:
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
         with:
-          fail-on-severity: moderate
+          fail-on-severity: high
