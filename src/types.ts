@@ -105,6 +105,7 @@ export interface PluginConfig {
   recallTimeout?: number
   captureTimeout?: number
   categories?: string[]
+  useConversationAccess?: boolean
 }
 
 export interface RecallOptions extends Filters {

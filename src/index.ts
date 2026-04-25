@@ -207,6 +207,7 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     recallTimeout: config?.recallTimeout ?? 10_000,
     captureTimeout: config?.captureTimeout ?? 15_000,
     categories: config?.categories,
+    useConversationAccess: config?.useConversationAccess ?? false,
   }
 }
 
@@ -289,6 +290,7 @@ export const configSchema = {
 
 function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dependencies: PluginDependencies = {}) {
   let managerPromise: Promise<MemoryManager> | null = null
+  const processedSessionIds = new Set<string>()
 
   function getManager(): Promise<MemoryManager> {
     if (!managerPromise) {
@@ -407,6 +409,86 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     }, undefined)
   }
 
+  async function beforeReset(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
+    if (!config.autoCapture) return
+    return safeRun({ ...ctx, logger }, "before_reset", async () => {
+      const messages = normalizeMessages(event.messages)
+      if (!messages.length) return
+      const sessionKey = ctx.sessionKey ?? ""
+      if (sessionKey) processedSessionIds.add(sessionKey)
+      const manager = await getManager()
+      const facts = await withTimeout(
+        manager.capture(messages, {
+          userId: resolveUserId(ctx, config),
+          sessionId: sessionKey || config.sessionId,
+          categories: config.categories,
+        }),
+        config.captureTimeout ?? 15_000,
+        "memory capture (before_reset)",
+      )
+      logger?.info?.(`[clawd-remember] before_reset: captured ${facts.length} facts`)
+    }, undefined)
+  }
+
+  async function sessionEnd(event: { sessionFile?: string; sessionId: string; reason?: string }, ctx: RuntimeContext = {}) {
+    if (!config.autoCapture) return
+    if (processedSessionIds.has(event.sessionId)) return
+    return safeRun({ ...ctx, logger }, "session_end", async () => {
+      if (!event.sessionFile) return
+      const fs = await import("node:fs/promises")
+      let raw: string
+      try {
+        raw = await fs.readFile(event.sessionFile, "utf-8")
+      } catch {
+        return
+      }
+      const messages: Message[] = []
+      for (const line of raw.trim().split("\n")) {
+        try {
+          const entry = JSON.parse(line) as { type?: string; message?: { role?: string; content?: unknown } }
+          if (entry.type === "message" && entry.message) {
+            const { role, content } = entry.message
+            if ((role === "user" || role === "assistant") && typeof content === "string" && content.trim()) {
+              messages.push({ role, content })
+            }
+          }
+        } catch { /* skip malformed lines */ }
+      }
+      if (!messages.length) return
+      processedSessionIds.add(event.sessionId)
+      const manager = await getManager()
+      const facts = await withTimeout(
+        manager.capture(messages, {
+          userId: resolveUserId(ctx, config),
+          sessionId: ctx.sessionKey ?? config.sessionId,
+          categories: config.categories,
+        }),
+        config.captureTimeout ?? 15_000,
+        "memory capture (session_end)",
+      )
+      logger?.info?.(`[clawd-remember] session_end (${event.reason ?? "unknown"}): captured ${facts.length} facts`)
+    }, undefined)
+  }
+
+  async function beforeCompaction(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
+    if (!config.autoCapture) return
+    return safeRun({ ...ctx, logger }, "before_compaction", async () => {
+      const messages = normalizeMessages(event.messages)
+      if (!messages.length) return
+      const manager = await getManager()
+      const facts = await withTimeout(
+        manager.capture(messages, {
+          userId: resolveUserId(ctx, config),
+          sessionId: ctx.sessionKey ?? config.sessionId,
+          categories: config.categories,
+        }),
+        config.captureTimeout ?? 15_000,
+        "memory capture (before_compaction)",
+      )
+      logger?.info?.(`[clawd-remember] before_compaction: captured ${facts.length} facts`)
+    }, undefined)
+  }
+
   return {
     search,
     add,
@@ -414,6 +496,9 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     list,
     beforePromptBuild,
     agentEnd,
+    beforeReset,
+    sessionEnd,
+    beforeCompaction,
   }
 }
 
@@ -574,9 +659,21 @@ export default definePluginEntry({
       return runtime.beforePromptBuild(event, ctx)
     })
 
-    api.on("agent_end", async (event, ctx) => {
-      return runtime.agentEnd(event, ctx)
-    })
+    if (cfg.useConversationAccess) {
+      api.on("agent_end", async (event, ctx) => {
+        return runtime.agentEnd(event, ctx)
+      })
+    } else {
+      api.on("before_reset", async (event, ctx) => {
+        return runtime.beforeReset(event as { messages?: unknown; sessionFile?: string }, ctx)
+      })
+      api.on("session_end", async (event, ctx) => {
+        return runtime.sessionEnd(event as { sessionFile?: string; sessionId: string; reason?: string }, ctx)
+      })
+      api.on("before_compaction", async (event, ctx) => {
+        return runtime.beforeCompaction(event as { messages?: unknown; sessionFile?: string }, ctx)
+      })
+    }
   },
 })
 
