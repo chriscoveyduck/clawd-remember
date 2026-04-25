@@ -504,7 +504,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "memory_search",
       description: "Search stored memories",
-      inputSchema: {
+      parameters: {
         type: "object",
         required: ["query"],
         properties: {
@@ -523,7 +523,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "memory_add",
       description: "Add a memory",
-      inputSchema: {
+      parameters: {
         type: "object",
         required: ["text"],
         properties: {
@@ -541,7 +541,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "memory_delete",
       description: "Delete a memory by id",
-      inputSchema: {
+      parameters: {
         type: "object",
         required: ["id"],
         properties: {
@@ -556,7 +556,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "memory_list",
       description: "List stored memories",
-      inputSchema: {
+      parameters: {
         type: "object",
         properties: {
           topK: { type: "number" },
