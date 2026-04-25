@@ -44,6 +44,7 @@ export interface LLMExtractor {
 }
 
 export interface SqliteStorageConfig {
+  dimensions?: number
   path?: string
 }
 
@@ -83,10 +84,19 @@ export interface PluginConfig {
     provider: "ollama"
     config: OllamaEmbedderConfig
   }
-  llm: {
-    provider: "openai-compatible"
-    config: OpenAICompatibleConfig
-  }
+  llm:
+    | {
+        provider: "openai-compatible"
+        config: OpenAICompatibleConfig
+      }
+    | {
+        provider: "github-copilot"
+        config: {
+          model?: string
+          tokenPath?: string
+          timeoutMs?: number
+        }
+      }
   userId: string
   sessionId?: string
   autoRecall?: boolean

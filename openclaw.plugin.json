@@ -1,0 +1,8 @@
+{
+  "id": "clawd-remember",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}
