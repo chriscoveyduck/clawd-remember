@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "@jest/globals"
 
-import { mkdtemp, rm } from "node:fs/promises"
+import { access, mkdtemp, readdir, rm } from "node:fs/promises"
+import { constants } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { pathToFileURL } from "node:url"
 
 import { SqliteStorageProvider } from "../src/storage/sqlite.js"
 import { createFactPayload } from "../src/utils.js"
 
-const maybeDescribe = canRunSqlite() ? describe : describe.skip
+const maybeDescribe = await canRunSqlite() ? describe : describe.skip
 
 maybeDescribe("SqliteStorageProvider", () => {
   let dir: string
@@ -42,12 +44,62 @@ maybeDescribe("SqliteStorageProvider", () => {
   })
 })
 
-function canRunSqlite(): boolean {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require("better-sqlite3")
-    return true
-  } catch {
-    return false
+async function canRunSqlite(): Promise<boolean> {
+  return await canImportPackage("better-sqlite3") && await canImportPackage("sqlite-vec")
+}
+
+async function canImportPackage(packageName: string): Promise<boolean> {
+  const directImports = [
+    async () => {
+      await import(packageName)
+    },
+  ]
+
+  for (const load of directImports) {
+    try {
+      await load()
+      return true
+    } catch {
+      // Fall through to global module paths.
+    }
   }
+
+  for (const root of await getGlobalModuleRoots()) {
+    for (const entry of [
+      join(root, packageName, "lib", "index.js"),
+      join(root, packageName, "index.js"),
+    ]) {
+      try {
+        await access(entry, constants.R_OK)
+        await import(pathToFileURL(entry).href)
+        return true
+      } catch {
+        // Try the next candidate path.
+      }
+    }
+  }
+
+  return false
+}
+
+async function getGlobalModuleRoots(): Promise<string[]> {
+  const roots = new Set<string>()
+  const nodePath = process.env.NODE_PATH?.split(":").filter(Boolean) ?? []
+  for (const candidate of nodePath) {
+    roots.add(candidate)
+  }
+
+  roots.add(join(process.execPath, "..", "..", "lib", "node_modules"))
+
+  try {
+    const versionsDir = join(process.env.HOME ?? "", ".nvm", "versions", "node")
+    const versions = await readdir(versionsDir)
+    for (const version of versions) {
+      roots.add(join(versionsDir, version, "lib", "node_modules"))
+    }
+  } catch {
+    // No nvm-managed global modules available.
+  }
+
+  return Array.from(roots)
 }
