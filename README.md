@@ -180,19 +180,24 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## Roadmap
 
 - [x] SQLite + sqlite-vec storage backend
-- [ ] MariaDB storage backend
 - [x] Ollama embedder
 - [x] OpenAI-compatible LLM extractor
+- [x] GitHub Copilot LLM extractor
 - [x] Auto-recall (inject memories before agent turn)
 - [x] Auto-capture (extract facts after agent turn)
 - [x] `memory_search` tool
 - [x] `memory_add` tool
 - [x] `memory_delete` tool
+- [x] `memory_list` tool
 - [x] Session-scoped vs long-term memory
 - [ ] PostgreSQL storage backend
 - [ ] Memory consolidation / deduplication
 - [ ] Cross-project fact linking
 - [ ] ClaWHub publish
+
+### Future / Out of Scope
+
+MariaDB/PostgreSQL backends are planned for a future release.
 
 ---
 
