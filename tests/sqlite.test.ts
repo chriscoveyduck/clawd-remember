@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "@jest/globals"
 
-import { access, mkdtemp, readdir, rm } from "node:fs/promises"
-import { constants } from "node:fs"
+import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { pathToFileURL } from "node:url"
 
 import { SqliteStorageProvider } from "../src/storage/sqlite.js"
 import { createFactPayload } from "../src/utils.js"
@@ -45,61 +43,23 @@ maybeDescribe("SqliteStorageProvider", () => {
 })
 
 async function canRunSqlite(): Promise<boolean> {
-  return await canImportPackage("better-sqlite3") && await canImportPackage("sqlite-vec")
-}
-
-async function canImportPackage(packageName: string): Promise<boolean> {
-  const directImports = [
-    async () => {
-      await import(packageName)
-    },
-  ]
-
-  for (const load of directImports) {
-    try {
-      await load()
-      return true
-    } catch {
-      // Fall through to global module paths.
-    }
-  }
-
-  for (const root of await getGlobalModuleRoots()) {
-    for (const entry of [
-      join(root, packageName, "lib", "index.js"),
-      join(root, packageName, "index.js"),
-    ]) {
-      try {
-        await access(entry, constants.R_OK)
-        await import(pathToFileURL(entry).href)
-        return true
-      } catch {
-        // Try the next candidate path.
-      }
-    }
-  }
-
-  return false
-}
-
-async function getGlobalModuleRoots(): Promise<string[]> {
-  const roots = new Set<string>()
-  const nodePath = process.env.NODE_PATH?.split(":").filter(Boolean) ?? []
-  for (const candidate of nodePath) {
-    roots.add(candidate)
-  }
-
-  roots.add(join(process.execPath, "..", "..", "lib", "node_modules"))
-
+  // First, check better-sqlite3 is importable.
   try {
-    const versionsDir = join(process.env.HOME ?? "", ".nvm", "versions", "node")
-    const versions = await readdir(versionsDir)
-    for (const version of versions) {
-      roots.add(join(versionsDir, version, "lib", "node_modules"))
-    }
+    await import("better-sqlite3")
   } catch {
-    // No nvm-managed global modules available.
+    return false
   }
 
-  return Array.from(roots)
+  // sqlite-vec uses import.meta.resolve internally (stable in Node >=20.3.0).
+  // Attempt to call getLoadablePath() to verify the full load path works;
+  // skip the suite gracefully on runtimes where it throws.
+  try {
+    const vec = await import("sqlite-vec") as { getLoadablePath: () => string }
+    vec.getLoadablePath()
+    return true
+  } catch {
+    // sqlite-vec not available or import.meta.resolve not supported on this runtime.
+    return false
+  }
 }
+
