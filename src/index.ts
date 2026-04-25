@@ -1,9 +1,11 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry"
+import { readFile } from "node:fs/promises"
+import { Type } from "@sinclair/typebox"
 
 import { MemoryManager } from "./memory.js"
 import { OllamaEmbedder } from "./embedders/ollama.js"
 import { OpenAICompatibleExtractor } from "./extractors/openai.js"
-import { SqliteStorageProvider } from "./storage/sqlite.js"
+import { PostgresStorageProvider } from "./storage/postgres.js"
 import type { Embedder, LLMExtractor, Message, PluginConfig, RecallOptions, StorageProvider } from "./types.js"
 import { withTimeout } from "./utils.js"
 
@@ -21,7 +23,7 @@ type ToolContext = RuntimeContext
 type ToolInput = Record<string, unknown>
 
 type PluginDependencies = {
-  createStorageProvider?: (config: PluginConfig) => StorageProvider
+  createStorageProvider?: (config: PluginConfig) => Promise<StorageProvider>
   createEmbedder?: (config: PluginConfig) => Embedder
   createExtractor?: (config: PluginConfig) => LLMExtractor
 }
@@ -35,10 +37,24 @@ type LegacyHookContext = {
   conversation?: Message[]
   userId?: string
   sessionId?: string
+  sessionFile?: string
+  reason?: string
+  messageCount?: number
+}
+
+type SessionMessageEvent = {
+  messages?: unknown
+  sessionFile?: string
+}
+
+type SessionEndEvent = {
+  sessionFile?: string
+  sessionId: string
+  reason?: string
 }
 
 async function createManager(config: PluginConfig, dependencies: PluginDependencies = {}): Promise<MemoryManager> {
-  const storage = (dependencies.createStorageProvider ?? createStorageProvider)(config)
+  const storage = await (dependencies.createStorageProvider ?? createStorageProvider)(config)
   const embedder = (dependencies.createEmbedder ?? ((currentConfig) => new OllamaEmbedder(currentConfig.embedder.config)))(config)
   const extractor = (dependencies.createExtractor ?? ((currentConfig) => new OpenAICompatibleExtractor(currentConfig.llm.config)))(config)
   const manager = new MemoryManager(storage, embedder, extractor, {
@@ -51,12 +67,16 @@ async function createManager(config: PluginConfig, dependencies: PluginDependenc
   return manager
 }
 
-function createStorageProvider(config: PluginConfig): SqliteStorageProvider {
+async function createStorageProvider(config: PluginConfig): Promise<StorageProvider> {
+  if (config.storage.provider === "postgres") {
+    return new PostgresStorageProvider(config.storage.config)
+  }
   if (config.storage.provider === "sqlite") {
+    // Dynamic import to avoid module-level resolution of optional better-sqlite3
+    const { SqliteStorageProvider } = await import("./storage/sqlite.js") as { SqliteStorageProvider: new (c: unknown) => StorageProvider }
     return new SqliteStorageProvider(config.storage.config)
   }
-
-  throw new Error(`Storage provider ${config.storage.provider} is not implemented yet`)
+  throw new Error(`Storage provider ${(config.storage as { provider: string }).provider} is not implemented yet`)
 }
 
 function warn(context: RuntimeContext | undefined, scope: string, error: unknown): void {
@@ -131,6 +151,37 @@ function normalizeMessages(messages: unknown): Message[] {
   })
 }
 
+async function loadMessagesFromSessionFile(sessionFile: string): Promise<Message[]> {
+  const content = await readFile(sessionFile, "utf8")
+  const messages: Message[] = []
+
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      continue
+    }
+
+    const entry = JSON.parse(trimmed) as {
+      type?: unknown
+      message?: { role?: unknown; content?: unknown }
+    }
+
+    if (entry.type !== "message") {
+      continue
+    }
+
+    const role = entry.message?.role
+    if (role !== "user" && role !== "assistant") {
+      continue
+    }
+
+    const message = normalizeMessages([{ role, content: entry.message?.content }])
+    messages.push(...message)
+  }
+
+  return messages
+}
+
 function resolveUserId(context: RuntimeContext | undefined, config: PluginConfig, override?: unknown): string {
   if (typeof override === "string" && override.trim()) {
     return override
@@ -148,7 +199,12 @@ function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, o
 }
 
 function normalizeConfig(config?: PluginConfig): PluginConfig {
-  const storage = config?.storage?.provider === "mariadb"
+  const storage = config?.storage?.provider === "postgres"
+    ? {
+      provider: "postgres" as const,
+      config: config.storage.config,
+    }
+    : config?.storage?.provider === "mariadb"
     ? {
       provider: "mariadb" as const,
       config: config.storage.config,
@@ -183,6 +239,7 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     sessionId: config?.sessionId,
     autoRecall: config?.autoRecall ?? true,
     autoCapture: config?.autoCapture ?? true,
+    useConversationAccess: config?.useConversationAccess ?? false,
     topK: config?.topK ?? 10,
     recallTimeout: config?.recallTimeout ?? 10_000,
     captureTimeout: config?.captureTimeout ?? 15_000,
@@ -198,7 +255,7 @@ export const configSchema = {
       type: "object",
       required: ["provider", "config"],
       properties: {
-        provider: { type: "string", enum: ["sqlite", "mariadb"] },
+        provider: { type: "string", enum: ["sqlite", "mariadb", "postgres"] },
         config: {
           type: "object",
           properties: {
@@ -256,6 +313,7 @@ export const configSchema = {
     sessionId: { type: "string" },
     autoRecall: { type: "boolean" },
     autoCapture: { type: "boolean" },
+    useConversationAccess: { type: "boolean" },
     topK: { type: "number" },
     recallTimeout: { type: "number" },
     captureTimeout: { type: "number" },
@@ -269,6 +327,7 @@ export const configSchema = {
 
 function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dependencies: PluginDependencies = {}) {
   let managerPromise: Promise<MemoryManager> | null = null
+  const processedSessionIds = new Set<string>()
 
   function getManager(): Promise<MemoryManager> {
     if (!managerPromise) {
@@ -367,12 +426,60 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     }, undefined)
   }
 
+  async function beforeReset(event: SessionMessageEvent, ctx: RuntimeContext = {}) {
+    return safeRun({ ...ctx, logger }, "before_reset", async () => {
+      const messages = normalizeMessages(event.messages)
+      if (!messages.length) {
+        return
+      }
+
+      await agentEnd({ messages }, ctx)
+      if (ctx.sessionKey) {
+        processedSessionIds.add(ctx.sessionKey)
+      }
+    }, undefined)
+  }
+
+  async function sessionEnd(event: SessionEndEvent, ctx: RuntimeContext = {}) {
+    if (processedSessionIds.has(event.sessionId)) {
+      return
+    }
+
+    return safeRun({ ...ctx, logger }, "session_end", async () => {
+      if (!event.sessionFile) {
+        return
+      }
+
+      const messages = await loadMessagesFromSessionFile(event.sessionFile)
+      if (!messages.length) {
+        return
+      }
+
+      await agentEnd({ messages }, { ...ctx, sessionKey: event.sessionId })
+      processedSessionIds.add(event.sessionId)
+    }, undefined)
+  }
+
+  async function beforeCompaction(event: SessionMessageEvent, ctx: RuntimeContext = {}) {
+    return safeRun({ ...ctx, logger }, "before_compaction", async () => {
+      const messages = normalizeMessages(event.messages)
+      if (!messages.length) {
+        return
+      }
+
+      return agentEnd({ messages }, ctx)
+    }, undefined)
+  }
+
   return {
     search,
     add,
     remove,
     beforePromptBuild,
     agentEnd,
+    beforeReset,
+    sessionEnd,
+    beforeCompaction,
   }
 }
 
@@ -410,8 +517,48 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
         }
       },
       async after_agent_turn(context: LegacyHookContext) {
-        const { runtime } = getRuntime(context)
+        const { config, runtime } = getRuntime(context)
+        if (!config.useConversationAccess) {
+          return context
+        }
+
         await runtime.agentEnd(
+          { messages: context.conversation ?? context.messages ?? [] },
+          { logger: context.logger, sessionKey: context.sessionId },
+        )
+        return context
+      },
+      async before_reset(context: LegacyHookContext) {
+        const { config, runtime } = getRuntime(context)
+        if (config.useConversationAccess) {
+          return context
+        }
+
+        await runtime.beforeReset(
+          { messages: context.conversation ?? context.messages ?? [] },
+          { logger: context.logger, sessionKey: context.sessionId },
+        )
+        return context
+      },
+      async session_end(context: LegacyHookContext & SessionEndEvent) {
+        const { config, runtime } = getRuntime(context)
+        if (config.useConversationAccess) {
+          return context
+        }
+
+        await runtime.sessionEnd(
+          { sessionFile: context.sessionFile, sessionId: context.sessionId, reason: context.reason },
+          { logger: context.logger, sessionKey: context.sessionId },
+        )
+        return context
+      },
+      async before_compaction(context: LegacyHookContext & { messageCount?: number }) {
+        const { config, runtime } = getRuntime(context)
+        if (config.useConversationAccess) {
+          return context
+        }
+
+        await runtime.beforeCompaction(
           { messages: context.conversation ?? context.messages ?? [] },
           { logger: context.logger, sessionKey: context.sessionId },
         )
@@ -449,24 +596,20 @@ export default definePluginEntry({
   name: "clawd-remember",
   description: "Self-hosted memory plugin using Postgres/SQLite + Ollama",
   register(api) {
-    const cfg = normalizeConfig(api.config as PluginConfig)
+    const cfg = normalizeConfig(api.pluginConfig as unknown as PluginConfig)
     const logger = api.logger
     const runtime = createRuntime(cfg, logger)
 
     api.registerTool({
       name: "memory_search",
       description: "Search stored memories",
-      inputSchema: {
-        type: "object",
-        required: ["query"],
-        properties: {
-          query: { type: "string" },
-          topK: { type: "number" },
-          userId: { type: "string" },
-          sessionId: { type: "string" },
-          categories: { type: "array", items: { type: "string" } },
-        },
-      },
+      parameters: Type.Object({
+        query: Type.String({ description: "Search query" }),
+        topK: Type.Optional(Type.Number({ description: "Max results" })),
+        userId: Type.Optional(Type.String()),
+        sessionId: Type.Optional(Type.String()),
+        categories: Type.Optional(Type.Array(Type.String())),
+      }),
       async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
         return runtime.search((input ?? {}) as ToolInput)
       },
@@ -475,16 +618,12 @@ export default definePluginEntry({
     api.registerTool({
       name: "memory_add",
       description: "Add a memory",
-      inputSchema: {
-        type: "object",
-        required: ["text"],
-        properties: {
-          text: { type: "string" },
-          userId: { type: "string" },
-          sessionId: { type: "string" },
-          categories: { type: "array", items: { type: "string" } },
-        },
-      },
+      parameters: Type.Object({
+        text: Type.String({ description: "Text to store" }),
+        userId: Type.Optional(Type.String()),
+        sessionId: Type.Optional(Type.String()),
+        categories: Type.Optional(Type.Array(Type.String())),
+      }),
       async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
         return runtime.add((input ?? {}) as ToolInput)
       },
@@ -493,13 +632,9 @@ export default definePluginEntry({
     api.registerTool({
       name: "memory_delete",
       description: "Delete a memory by id",
-      inputSchema: {
-        type: "object",
-        required: ["id"],
-        properties: {
-          id: { type: "string" },
-        },
-      },
+      parameters: Type.Object({
+        id: Type.String({ description: "Memory ID to delete" }),
+      }),
       async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
         return runtime.remove((input ?? {}) as ToolInput)
       },
@@ -509,14 +644,27 @@ export default definePluginEntry({
       return runtime.beforePromptBuild(event, ctx)
     })
 
-    api.on("agent_end", async (event, ctx) => {
-      return runtime.agentEnd(event, ctx)
-    })
+    if (cfg.useConversationAccess) {
+      api.on("agent_end", async (event, ctx) => {
+        return runtime.agentEnd(event, ctx)
+      })
+    } else {
+      api.on("before_reset", async (event, ctx) => {
+        return runtime.beforeReset(event, ctx)
+      })
+
+      api.on("session_end", async (event, ctx) => {
+        return runtime.sessionEnd(event as SessionEndEvent, ctx)
+      })
+
+      api.on("before_compaction", async (event, ctx) => {
+        return runtime.beforeCompaction(event, ctx)
+      })
+    }
   },
 })
 
 export * from "./types.js"
 export * from "./memory.js"
-export * from "./storage/sqlite.js"
 export * from "./embedders/ollama.js"
 export * from "./extractors/openai.js"

@@ -45,6 +45,7 @@ Add to your `openclaw.json`:
           "userId": "your-user-id",
           "autoRecall": true,
           "autoCapture": true,
+          "useConversationAccess": false,
           "storage": {
             "provider": "sqlite",
             "config": {
@@ -110,10 +111,31 @@ Add to your `openclaw.json`:
 | `sessionId` | unset | Optional session-scoped memory id |
 | `autoRecall` | `true` | Inject relevant memories before prompt build |
 | `autoCapture` | `true` | Extract and store facts after each agent turn |
+| `useConversationAccess` | `false` | Switch between hook-based capture and `agent_end` conversation capture |
 | `topK` | `10` | Number of memories returned for recall/search |
 | `recallTimeout` | `10000` | Timeout in milliseconds for recall |
 | `captureTimeout` | `15000` | Timeout in milliseconds for capture |
 | `categories` | unset | Optional tags applied to captured/manual facts |
+
+### `useConversationAccess`
+
+`clawd-remember` defaults to `useConversationAccess: false` because current OpenClaw releases reject `plugins.entries.<plugin>.hooks.allowConversationAccess` in `openclaw.json` due to a strict `PluginEntrySchema` bug.
+
+With `useConversationAccess: false`, the plugin uses hook mode:
+
+- `before_reset` captures in-memory messages on `/new` and `/reset`
+- `before_compaction` captures messages before long sessions are pruned
+- `session_end` reads the session transcript from disk at the end of a session
+
+This mode avoids the conversation-access schema bug, but it captures at lifecycle boundaries instead of every single `agent_end`. Mid-session turns are primarily covered by `before_compaction`, so shorter sessions may not be persisted until reset or session end.
+
+When OpenClaw fixes the schema bug, you can switch to conversation mode:
+
+1. Set `"useConversationAccess": true` in the plugin config.
+2. Set `plugins.entries.clawd-remember.hooks.allowConversationAccess` to `true` in `openclaw.json`.
+3. Restart the OpenClaw gateway.
+
+With `useConversationAccess: true`, the plugin registers `agent_end` only. That restores per-turn capture after every agent response, but it depends on the OpenClaw conversation-access config being accepted.
 
 ### Notes
 

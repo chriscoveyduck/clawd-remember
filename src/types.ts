@@ -47,6 +47,15 @@ export interface SqliteStorageConfig {
   path?: string
 }
 
+export interface PostgresStorageConfig {
+  host: string
+  port?: number
+  user: string
+  password: string
+  database: string
+  table?: string
+}
+
 export interface MariaDbStorageConfig {
   host: string
   port?: number
@@ -79,6 +88,10 @@ export interface PluginConfig {
       provider: "mariadb"
       config: MariaDbStorageConfig
     }
+    | {
+      provider: "postgres"
+      config: PostgresStorageConfig
+    }
   embedder: {
     provider: "ollama"
     config: OllamaEmbedderConfig
@@ -91,6 +104,7 @@ export interface PluginConfig {
   sessionId?: string
   autoRecall?: boolean
   autoCapture?: boolean
+  useConversationAccess?: boolean
   topK?: number
   recallTimeout?: number
   captureTimeout?: number

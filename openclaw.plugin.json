@@ -1,0 +1,23 @@
+{
+  "id": "clawd-remember",
+  "name": "clawd-remember",
+  "description": "Self-hosted memory plugin for OpenClaw. Stores conversation facts in Postgres or SQLite with vector search via Ollama or OpenAI embeddings. No telemetry.",
+  "version": "0.1.0",
+  "kind": "memory",
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_add",
+      "memory_delete"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "useConversationAccess": {
+        "type": "boolean"
+      }
+    },
+    "additionalProperties": true
+  }
+}
