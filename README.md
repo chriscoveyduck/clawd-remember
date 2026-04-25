@@ -27,6 +27,16 @@ Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to
 
 ---
 
+## Prerequisites
+
+Node.js must be installed via [nvm](https://github.com/nvm-sh/nvm). Do **not** use apt/brew — the system Node does not resolve global modules correctly.
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+nvm install 22
+nvm use 22
+```
+
 ## Quick Start
 
 ```bash
