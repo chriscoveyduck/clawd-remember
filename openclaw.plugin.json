@@ -78,11 +78,11 @@
         "items": {
           "type": "string"
         }
+      },
+      "useConversationAccess": {
+        "type": "boolean"
       }
     },
     "additionalProperties": false
-  },
-  "hooks": {
-    "allowConversationAccess": true
   }
 }
