@@ -42,4 +42,38 @@ describe("MemoryManager", () => {
     await manager.delete(fact.id)
     expect(await manager.list({ user_id: "user-1" })).toHaveLength(0)
   })
+
+  it("deduplicates identical facts for the same user", async () => {
+    const manager = new MemoryManager(
+      new InMemoryStorageProvider(),
+      new MockEmbedder(),
+      new MockExtractor([]),
+      { userId: "user-1" },
+    )
+
+    await manager.init()
+    await manager.add("User prefers SQLite", "user-1")
+    await manager.add("User prefers SQLite", "user-1")
+
+    const facts = await manager.list({ user_id: "user-1" })
+    expect(facts).toHaveLength(1)
+    expect(facts[0]?.data).toBe("User prefers SQLite")
+  })
+
+  it("stores identical facts separately for different users", async () => {
+    const manager = new MemoryManager(
+      new InMemoryStorageProvider(),
+      new MockEmbedder(),
+      new MockExtractor([]),
+      { userId: "user-1" },
+    )
+
+    await manager.init()
+    await manager.add("User prefers SQLite", "user-1")
+    await manager.add("User prefers SQLite", "user-2")
+
+    expect(await manager.list({ user_id: "user-1" })).toHaveLength(1)
+    expect(await manager.list({ user_id: "user-2" })).toHaveLength(1)
+    expect(await manager.list()).toHaveLength(2)
+  })
 })

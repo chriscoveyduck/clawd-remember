@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { SqliteStorageProvider } from "../src/storage/sqlite.js"
 import { createFactPayload } from "../src/utils.js"
 
-const maybeDescribe = canRunSqlite() ? describe : describe.skip
+const maybeDescribe = await canRunSqlite() ? describe : describe.skip
 
 maybeDescribe("SqliteStorageProvider", () => {
   let dir: string
@@ -42,12 +42,24 @@ maybeDescribe("SqliteStorageProvider", () => {
   })
 })
 
-function canRunSqlite(): boolean {
+async function canRunSqlite(): Promise<boolean> {
+  // First, check better-sqlite3 is importable.
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require("better-sqlite3")
-    return true
+    await import("better-sqlite3")
   } catch {
     return false
   }
+
+  // sqlite-vec uses import.meta.resolve internally (stable in Node >=20.3.0).
+  // Attempt to call getLoadablePath() to verify the full load path works;
+  // skip the suite gracefully on runtimes where it throws.
+  try {
+    const vec = await import("sqlite-vec") as { getLoadablePath: () => string }
+    vec.getLoadablePath()
+    return true
+  } catch {
+    // sqlite-vec not available or import.meta.resolve not supported on this runtime.
+    return false
+  }
 }
+
