@@ -27,10 +27,24 @@ Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to
 
 ---
 
+## Prerequisites
+
+Node.js must be installed via [nvm](https://github.com/nvm-sh/nvm). Do **not** use apt/brew — the system Node does not resolve global modules correctly.
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+nvm install 22
+nvm use 22
+```
+
 ## Quick Start
 
 ```bash
-npm install clawd-remember better-sqlite3 sqlite-vec
+# Install the plugin globally
+npm install -g clawd-remember
+
+# If using SQLite backend, install native deps into the plugin directory:
+sudo npm install --prefix $(npm root -g)/clawd-remember better-sqlite3 sqlite-vec
 ```
 
 Add to your `openclaw.json`:

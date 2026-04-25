@@ -70,7 +70,7 @@ export class SqliteStorageProvider implements StorageProvider {
       db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
           id TEXT PRIMARY KEY,
-          embedding FLOAT[1536]
+          embedding FLOAT[${this.config.dimensions ?? 1536}]
         );
       `)
     }
@@ -275,7 +275,9 @@ async function loadBetterSqlite3(): Promise<SqliteModule["default"]> {
     return module.default
   } catch (error) {
     throw new Error(
-      `SQLite storage requires optional dependency better-sqlite3. Install it with \`npm install better-sqlite3\`. ${getErrorMessage(error)}`,
+      "better-sqlite3 is required for the SQLite storage backend.\n" +
+      "Install it with: npm install better-sqlite3 sqlite-vec\n" +
+      "If you are using a remote backend (postgres/mariadb), set provider accordingly in your config.",
     )
   }
 }

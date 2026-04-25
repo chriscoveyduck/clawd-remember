@@ -40,7 +40,12 @@ type LegacyHookContext = {
 async function createManager(config: PluginConfig, dependencies: PluginDependencies = {}): Promise<MemoryManager> {
   const storage = (dependencies.createStorageProvider ?? createStorageProvider)(config)
   const embedder = (dependencies.createEmbedder ?? ((currentConfig) => new OllamaEmbedder(currentConfig.embedder.config)))(config)
-  const extractor = (dependencies.createExtractor ?? ((currentConfig) => new OpenAICompatibleExtractor(currentConfig.llm.config)))(config)
+  const extractor = (dependencies.createExtractor ?? ((currentConfig) => {
+    if (currentConfig.llm.provider !== "openai-compatible") {
+      throw new Error(`Unsupported LLM provider for extraction: ${currentConfig.llm.provider}`)
+    }
+    return new OpenAICompatibleExtractor(currentConfig.llm.config)
+  }))(config)
   const manager = new MemoryManager(storage, embedder, extractor, {
     userId: config.userId,
     sessionId: config.sessionId,
@@ -173,9 +178,9 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     llm: {
       provider: "openai-compatible",
       config: {
-        baseURL: config?.llm?.config?.baseURL ?? "http://localhost:4141/v1",
+        baseURL: (config?.llm?.provider === "openai-compatible" ? config.llm.config.baseURL : undefined) ?? "http://localhost:4141/v1",
         model: config?.llm?.config?.model ?? "gpt-4o-mini",
-        apiKey: config?.llm?.config?.apiKey ?? "dummy",
+        apiKey: (config?.llm?.provider === "openai-compatible" ? config.llm.config.apiKey : undefined) ?? "dummy",
         timeoutMs: config?.llm?.config?.timeoutMs,
       },
     },
