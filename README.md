@@ -30,7 +30,11 @@ Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to
 ## Quick Start
 
 ```bash
-npm install clawd-remember better-sqlite3 sqlite-vec
+# Install the plugin globally
+npm install -g clawd-remember
+
+# If using SQLite backend, install native deps into the plugin directory:
+sudo npm install --prefix $(npm root -g)/clawd-remember better-sqlite3 sqlite-vec
 ```
 
 Add to your `openclaw.json`:
