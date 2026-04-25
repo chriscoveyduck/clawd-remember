@@ -497,7 +497,7 @@ export default definePluginEntry({
   name: "clawd-remember",
   description: "Self-hosted memory plugin using Postgres/SQLite + Ollama",
   register(api) {
-    const cfg = normalizeConfig(api.config as PluginConfig)
+    const cfg = normalizeConfig(api.pluginConfig as unknown as PluginConfig)
     const logger = api.logger
     const runtime = createRuntime(cfg, logger)
 
