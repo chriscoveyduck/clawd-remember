@@ -123,6 +123,23 @@ describe("plugin entry", () => {
     expect(results[0]?.fact.data).toBe("User likes tea")
   })
 
+  it("lists memories through the memory_list tool", async () => {
+    const plugin = createPlugin({
+      createStorageProvider: () => new InMemoryStorageProvider(),
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => new TestExtractor(),
+    })
+    const addTool = plugin.tools.find((tool) => tool.name === "memory_add")
+    const listTool = plugin.tools.find((tool) => tool.name === "memory_list")
+
+    await addTool?.execute({ text: "User likes tea" }, { config, logger: { warn: jest.fn() } })
+    await addTool?.execute({ text: "User has a cat" }, { config, logger: { warn: jest.fn() } })
+    const results = await listTool?.execute({}, { config, logger: { warn: jest.fn() } }) as Array<{ data: string }>
+
+    expect(results).toHaveLength(2)
+    expect(results.map((item) => item.data)).toEqual(expect.arrayContaining(["User likes tea", "User has a cat"]))
+  })
+
   it("deletes memories through the memory_delete tool", async () => {
     const plugin = createPlugin({
       createStorageProvider: () => new InMemoryStorageProvider(),
@@ -157,6 +174,24 @@ describe("safeRun degradation", () => {
 
     await expect(plugin.hooks.after_agent_turn(context)).resolves.toBe(context)
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("agent_end"))
+  })
+
+  it("skips capture when agent turn was unsuccessful", async () => {
+    const plugin = createPlugin({
+      createStorageProvider: () => new InMemoryStorageProvider(),
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => new TestExtractor(),
+    })
+    const context = {
+      config: buildConfig(),
+      messages: [{ role: "user", content: "User likes tea" }],
+      success: false,
+      logger: { warn: jest.fn() },
+    }
+    const searchTool = plugin.tools.find((tool) => tool.name === "memory_search")
+
+    await expect(plugin.hooks.after_agent_turn(context)).resolves.toBe(context)
+    await expect(searchTool?.execute({ query: "tea" }, { config: buildConfig(), logger: { warn: jest.fn() } })).resolves.toEqual([])
   })
 
   it("returns the original context when recall fails", async () => {

@@ -8,7 +8,9 @@ import type { Embedder, LLMExtractor, Message, PluginConfig, RecallOptions, Stor
 import { withTimeout } from "./utils.js"
 
 type LoggerLike = {
+  info?: (message: string) => void
   warn?: (message: string) => void
+  error?: (message: string) => void
 }
 
 type RuntimeContext = {
@@ -37,7 +39,11 @@ type LegacyHookContext = {
   sessionId?: string
 }
 
-async function createManager(config: PluginConfig, dependencies: PluginDependencies = {}): Promise<MemoryManager> {
+async function createManager(
+  config: PluginConfig,
+  logger?: LoggerLike,
+  dependencies: PluginDependencies = {},
+): Promise<MemoryManager> {
   const storage = (dependencies.createStorageProvider ?? createStorageProvider)(config)
   const embedder = (dependencies.createEmbedder ?? ((currentConfig) => new OllamaEmbedder(currentConfig.embedder.config)))(config)
   const extractor = (dependencies.createExtractor ?? ((currentConfig) => {
@@ -52,7 +58,16 @@ async function createManager(config: PluginConfig, dependencies: PluginDependenc
     categories: config.categories,
     topK: config.topK,
   })
-  await manager.init()
+  try {
+    await manager.init()
+  } catch (error) {
+    const wrapped = new Error(
+      `[clawd-remember] manager init failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error instanceof Error ? error : undefined },
+    )
+    logger?.error?.(wrapped.message)
+    throw wrapped
+  }
   return manager
 }
 
@@ -277,7 +292,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
 
   function getManager(): Promise<MemoryManager> {
     if (!managerPromise) {
-      managerPromise = createManager(config, dependencies)
+      managerPromise = createManager(config, logger, dependencies)
     }
     return managerPromise
   }
@@ -318,6 +333,19 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     }, { deleted: false })
   }
 
+  async function list(input: ToolInput, ctx: ToolContext = {}) {
+    return safeRun({ ...ctx, logger }, "memory_list tool", async () => {
+      const manager = await getManager()
+      return manager.list({
+        user_id: resolveUserId(ctx, config, input.userId),
+        session_id: typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
+        categories: Array.isArray(input.categories)
+          ? input.categories.filter((item): item is string => typeof item === "string")
+          : undefined,
+      }, typeof input.topK === "number" ? input.topK : config.topK)
+    }, [])
+  }
+
   async function beforePromptBuild(event: { prompt?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoRecall) {
       return
@@ -344,12 +372,18 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
         return
       }
 
-      return { prependSystemContext: block }
+      logger?.info?.(`[clawd-remember] recalled ${memories.length} memories for prompt`)
+
+      return { prependContext: block }
     }, undefined)
   }
 
-  async function agentEnd(event: { messages?: unknown }, ctx: RuntimeContext = {}) {
+  async function agentEnd(event: { messages?: unknown, success?: boolean }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) {
+      return
+    }
+
+    if (event.success === false) {
       return
     }
 
@@ -360,7 +394,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       }
 
       const manager = await getManager()
-      await withTimeout(
+      const facts = await withTimeout(
         manager.capture(messages, {
           userId: resolveUserId(ctx, config),
           sessionId: ctx?.sessionKey ?? config.sessionId,
@@ -369,6 +403,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
         config.captureTimeout ?? 15_000,
         "memory capture",
       )
+      logger?.info?.(`[clawd-remember] captured ${facts.length} facts for user ${resolveUserId(ctx, config)}`)
     }, undefined)
   }
 
@@ -376,6 +411,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     search,
     add,
     remove,
+    list,
     beforePromptBuild,
     agentEnd,
   }
@@ -405,19 +441,19 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
           { prompt: context.prompt ?? context.input },
           { logger: context.logger, sessionKey: context.sessionId },
         )
-        if (!result?.prependSystemContext) {
+        if (!result?.prependContext) {
           return context
         }
 
         return {
           ...context,
-          prompt: [result.prependSystemContext, context.prompt ?? context.input ?? ""].filter(Boolean).join("\n\n"),
+          prompt: [result.prependContext, context.prompt ?? context.input ?? ""].filter(Boolean).join("\n\n"),
         }
       },
       async after_agent_turn(context: LegacyHookContext) {
         const { runtime } = getRuntime(context)
         await runtime.agentEnd(
-          { messages: context.conversation ?? context.messages ?? [] },
+          { messages: context.conversation ?? context.messages ?? [], success: (context as { success?: boolean }).success },
           { logger: context.logger, sessionKey: context.sessionId },
         )
         return context
@@ -443,6 +479,13 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
         async execute(input: ToolInput, context: LegacyHookContext) {
           const { runtime } = getRuntime(context)
           return runtime.remove(input, { logger: context.logger, sessionKey: context.sessionId })
+        },
+      },
+      {
+        name: "memory_list",
+        async execute(input: ToolInput, context: LegacyHookContext) {
+          const { runtime } = getRuntime(context)
+          return runtime.list(input, { logger: context.logger, sessionKey: context.sessionId })
         },
       },
     ],
@@ -507,6 +550,23 @@ export default definePluginEntry({
       },
       async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
         return runtime.remove((input ?? {}) as ToolInput)
+      },
+    } as unknown as Parameters<typeof api.registerTool>[0])
+
+    api.registerTool({
+      name: "memory_list",
+      description: "List stored memories",
+      inputSchema: {
+        type: "object",
+        properties: {
+          topK: { type: "number" },
+          userId: { type: "string" },
+          sessionId: { type: "string" },
+          categories: { type: "array", items: { type: "string" } },
+        },
+      },
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
+        return runtime.list((input ?? {}) as ToolInput)
       },
     } as unknown as Parameters<typeof api.registerTool>[0])
 

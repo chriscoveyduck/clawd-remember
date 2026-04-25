@@ -3,6 +3,75 @@
   "kind": "memory",
   "configSchema": {
     "type": "object",
-    "additionalProperties": true
+    "properties": {
+      "storage": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object"
+          }
+        },
+        "required": ["provider", "config"],
+        "additionalProperties": false
+      },
+      "embedder": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object"
+          }
+        },
+        "required": ["provider", "config"],
+        "additionalProperties": false
+      },
+      "llm": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object"
+          }
+        },
+        "required": ["provider", "config"],
+        "additionalProperties": false
+      },
+      "userId": {
+        "type": "string"
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "topK": {
+        "type": "number"
+      },
+      "recallTimeout": {
+        "type": "number"
+      },
+      "captureTimeout": {
+        "type": "number"
+      },
+      "categories": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": ["storage", "embedder", "llm", "userId"],
+    "additionalProperties": false
   }
 }
