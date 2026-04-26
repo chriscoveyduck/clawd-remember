@@ -357,6 +357,7 @@ export const configSchema = {
     sessionId: { type: "string" },
     autoRecall: { type: "boolean" },
     autoCapture: { type: "boolean" },
+    useConversationAccess: { type: "boolean" },
     topK: { type: "number" },
     recallTimeout: { type: "number" },
     captureTimeout: { type: "number" },
