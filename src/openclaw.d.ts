@@ -17,6 +17,14 @@ declare module "openclaw/plugin-sdk" {
   }
 }
 
+declare module "openclaw/plugin-sdk/routing" {
+  export interface ParsedAgentSessionKey {
+    agentId: string
+    rest: string
+  }
+  export function parseAgentSessionKey(sessionKey: string | undefined | null): ParsedAgentSessionKey | null
+}
+
 declare module "openclaw" {
   export { definePluginEntry } from "openclaw/plugin-sdk"
 }
