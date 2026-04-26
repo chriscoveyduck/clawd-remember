@@ -8,10 +8,12 @@
  */
 
 import { describe, expect, it } from "@jest/globals"
-import { createPlugin } from "../src/index.js"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { createPlugin, loadInstanceId } from "../src/index.js"
 import type { PluginConfig } from "../src/types.js"
 import { InMemoryStorageProvider, MockEmbedder, MockExtractor } from "./helpers.js"
-import os from "node:os"
 
 function buildConfig(overrides: Partial<PluginConfig> = {}): PluginConfig {
   return {
@@ -166,34 +168,74 @@ describe("partition key derivation", () => {
     expect(bobResults[0]!.user_id).toBe("testdevice01:bob")
   })
 
-  it("falls back to hostname prefix when device.json is missing", async () => {
-    // No devicePrefix injected — it will try to read device.json which won't be at a test path.
-    // We can't fully test loadDevicePrefix() without mocking fs, so we test the hostname fallback
-    // by verifying the plugin works and the key is structured correctly.
-    // This test just validates behaviour when devicePrefix injectable is NOT provided — the
-    // real loadDevicePrefix() will either succeed (if device.json exists) or use hostname.
-    const storage = new InMemoryStorageProvider()
-    const plugin = createPlugin({
-      createStorageProvider: () => storage,
-      createEmbedder: () => new MockEmbedder(),
-      createExtractor: () => new MockExtractor(["hostname fallback fact"]),
-      // NOTE: no devicePrefix — uses real loadDevicePrefix()
-    })
+  it("loadInstanceId: generates and persists a UUID when file does not exist", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawd-remember-test-"))
+    const instanceIdPath = path.join(tmpDir, "clawd-remember-instance-id")
 
-    const addTool = plugin.tools.find((t) => t.name === "memory_add")!
-    await addTool.execute(
-      { text: "Hostname fallback" },
-      { config: buildConfig(), sessionId: "agent:main:telegram:direct:999" },
-    )
+    try {
+      const id1 = await loadInstanceId(instanceIdPath)
+      const id2 = await loadInstanceId(instanceIdPath)
 
-    const listTool = plugin.tools.find((t) => t.name === "memory_list")!
-    const results = await listTool.execute(
-      {},
-      { config: buildConfig(), sessionId: "agent:main:telegram:direct:999" },
-    ) as Array<{ data: string; user_id: string }>
+      // Stable across calls
+      expect(id1).toBe(id2)
+      // First 12 chars of a UUID v4
+      expect(id1.length).toBe(12)
 
-    expect(results).toHaveLength(1)
-    // The user_id should be `{prefix}:main` — prefix is either real deviceId or hostname
-    expect(results[0]!.user_id).toMatch(/^.{1,12}:main$/)
+      // File was persisted as a full UUID v4
+      const raw = await fs.readFile(instanceIdPath, "utf-8")
+      expect(raw.trim()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      // The prefix is the first 12 chars of the persisted UUID
+      expect(raw.trim().slice(0, 12)).toBe(id1)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("loadInstanceId: reads existing UUID from file without regenerating", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawd-remember-test-"))
+    const instanceIdPath = path.join(tmpDir, "clawd-remember-instance-id")
+
+    try {
+      const knownUUID = "aabbccdd-1122-4000-8000-ffeeddccbbaa"
+      await fs.writeFile(instanceIdPath, knownUUID, "utf-8")
+
+      const id = await loadInstanceId(instanceIdPath)
+      expect(id).toBe("aabbccdd-112")  // first 12 chars of the known UUID
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("plugin uses instanceIdPath injectable for stable partition prefix", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawd-remember-test-"))
+    const instanceIdPath = path.join(tmpDir, "clawd-remember-instance-id")
+
+    try {
+      const storage = new InMemoryStorageProvider()
+      const plugin = createPlugin({
+        createStorageProvider: () => storage,
+        createEmbedder: () => new MockEmbedder(),
+        createExtractor: () => new MockExtractor(["instance id fact"]),
+        instanceIdPath,
+      })
+
+      const addTool = plugin.tools.find((t) => t.name === "memory_add")!
+      await addTool.execute(
+        { text: "Instance ID test" },
+        { config: buildConfig(), sessionId: "agent:main:telegram:direct:999" },
+      )
+
+      const listTool = plugin.tools.find((t) => t.name === "memory_list")!
+      const results = await listTool.execute(
+        {},
+        { config: buildConfig(), sessionId: "agent:main:telegram:direct:999" },
+      ) as Array<{ data: string; user_id: string }>
+
+      expect(results).toHaveLength(1)
+      // The key should be {first 12 chars of generated UUID}:main
+      expect(results[0]!.user_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{3}:main$/)
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
   })
 })

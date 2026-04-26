@@ -29,8 +29,10 @@ type PluginDependencies = {
   createStorageProvider?: (config: PluginConfig) => StorageProvider
   createEmbedder?: (config: PluginConfig) => Embedder
   createExtractor?: (config: PluginConfig) => LLMExtractor
-  /** Injectable for testing: override the device prefix (bypasses device.json read) */
+  /** Injectable for testing: override the resolved partition prefix (bypasses instance ID file). */
   devicePrefix?: string
+  /** Injectable for testing: override the instance ID file path used by loadInstanceId(). */
+  instanceIdPath?: string
 }
 
 type LegacyHookContext = {
@@ -44,20 +46,41 @@ type LegacyHookContext = {
   sessionId?: string
 }
 
-async function loadDevicePrefix(): Promise<string> {
+/**
+ * Load (or generate and persist) the stable instance ID used as the Level 1 partition prefix.
+ *
+ * Reads from ~/.openclaw/clawd-remember-instance-id (plain text UUID).
+ * If the file does not exist, a new UUID v4 is generated, persisted, and used.
+ * The file lives outside the plugin install directory so it survives upgrades.
+ *
+ * @param instanceIdPath - Override path for testing; defaults to ~/.openclaw/clawd-remember-instance-id
+ */
+export async function loadInstanceId(
+  instanceIdPath = path.join(os.homedir(), ".openclaw", "clawd-remember-instance-id"),
+): Promise<string> {
+  const fs = await import("node:fs/promises")
+
   try {
-    const fs = await import("node:fs/promises")
-    const devicePath = path.join(os.homedir(), ".openclaw", "identity", "device.json")
-    const raw = await fs.readFile(devicePath, "utf-8")
-    const parsed = JSON.parse(raw) as { deviceId?: string }
-    const deviceId = typeof parsed.deviceId === "string" ? parsed.deviceId : ""
-    if (deviceId.length >= 1) {
-      return deviceId.slice(0, 12)
+    const existing = await fs.readFile(instanceIdPath, "utf-8")
+    const id = existing.trim()
+    if (id.length >= 1) {
+      return id.slice(0, 12)
     }
   } catch {
-    // fall through to hostname
+    // file missing or unreadable — generate a new one
   }
-  return os.hostname().slice(0, 12)
+
+  const { randomUUID } = await import("node:crypto")
+  const newId = randomUUID()
+
+  try {
+    await fs.mkdir(path.dirname(instanceIdPath), { recursive: true })
+    await fs.writeFile(instanceIdPath, newId, "utf-8")
+  } catch {
+    // If we cannot persist, still use the generated ID for this session
+  }
+
+  return newId.slice(0, 12)
 }
 
 /**
@@ -334,7 +357,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   // Load device prefix once at startup. Cached as a promise so all callers await the same result.
   const devicePrefixPromise: Promise<string> = dependencies.devicePrefix !== undefined
     ? Promise.resolve(dependencies.devicePrefix)
-    : loadDevicePrefix()
+    : loadInstanceId(dependencies.instanceIdPath)
 
   function getManager(): Promise<MemoryManager> {
     if (!managerPromise) {
