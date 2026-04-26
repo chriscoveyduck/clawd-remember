@@ -1,10 +1,8 @@
 # clawd-remember
 
-> A lightweight, reliable, OpenClaw-native memory plugin that actually works.
+> A lightweight, self-hosted memory plugin for OpenClaw agents.
 
-**clawd-remember** is an open-source memory plugin for [OpenClaw](https://openclaw.ai) that gives your AI agent persistent, searchable long-term memory — without the instability, telemetry overhead, and mystery timeouts of other solutions.
-
-Built because the existing options have reliability problems. Designed to be the one that doesn't.
+**clawd-remember** is an open-source memory plugin for [OpenClaw](https://openclaw.ai) that gives your AI agent persistent, searchable long-term memory — private, self-hosted, and easy to run.
 
 ---
 
@@ -24,7 +22,7 @@ Built because the existing options have reliability problems. Designed to be the
 
 ## Why clawd-remember?
 
-Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to self-host reliably. clawd-remember takes a different approach: a minimal, auditable codebase with no unnecessary dependencies, and storage backends that are easy to run and maintain.
+clawd-remember is built around a simple principle: a minimal, auditable codebase with no unnecessary dependencies, and storage backends that are easy to run and maintain.
 
 ---
 
