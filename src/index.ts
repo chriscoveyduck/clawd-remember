@@ -1,4 +1,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry"
+import { parseAgentSessionKey } from "openclaw/plugin-sdk/routing"
+import os from "node:os"
+import path from "node:path"
 
 import { MemoryManager } from "./memory.js"
 import { OllamaEmbedder } from "./embedders/ollama.js"
@@ -26,6 +29,8 @@ type PluginDependencies = {
   createStorageProvider?: (config: PluginConfig) => StorageProvider
   createEmbedder?: (config: PluginConfig) => Embedder
   createExtractor?: (config: PluginConfig) => LLMExtractor
+  /** Injectable for testing: override the device prefix (bypasses device.json read) */
+  devicePrefix?: string
 }
 
 type LegacyHookContext = {
@@ -37,6 +42,47 @@ type LegacyHookContext = {
   conversation?: Message[]
   userId?: string
   sessionId?: string
+}
+
+async function loadDevicePrefix(): Promise<string> {
+  try {
+    const fs = await import("node:fs/promises")
+    const devicePath = path.join(os.homedir(), ".openclaw", "identity", "device.json")
+    const raw = await fs.readFile(devicePath, "utf-8")
+    const parsed = JSON.parse(raw) as { deviceId?: string }
+    const deviceId = typeof parsed.deviceId === "string" ? parsed.deviceId : ""
+    if (deviceId.length >= 1) {
+      return deviceId.slice(0, 12)
+    }
+  } catch {
+    // fall through to hostname
+  }
+  return os.hostname().slice(0, 12)
+}
+
+/**
+ * Resolve a two-level partition key for memory storage.
+ *
+ * Level 1 (gateway identity): deviceId prefix — stable per deployment.
+ * Level 2 (agent identity): agentId parsed from session key, or config.userId override, or "default".
+ *
+ * Format: `{devicePrefix}:{agentId}`  e.g. `abb67c9c0911:main`
+ *
+ * config.userId, when set, overrides the parsed agentId only (Level 2).
+ * This lets a cron agent explicitly read from main's memory pool.
+ *
+ * For tool calls that accept an explicit userId input parameter, that full override
+ * is returned as-is (preserving original behaviour for explicit overrides).
+ */
+function resolvePartitionKey(
+  devicePrefix: string,
+  context: RuntimeContext | undefined,
+  config: PluginConfig,
+): string {
+  const sessionKey = context?.sessionKey
+  const parsedAgentId = sessionKey ? parseAgentSessionKey(sessionKey)?.agentId : undefined
+  const agentId = config.userId ?? parsedAgentId ?? "default"
+  return `${devicePrefix}:${agentId}`
 }
 
 async function createManager(
@@ -53,7 +99,7 @@ async function createManager(
     return new OpenAICompatibleExtractor(currentConfig.llm.config)
   }))(config)
   const manager = new MemoryManager(storage, embedder, extractor, {
-    userId: config.userId,
+    userId: config.userId ?? "default",
     sessionId: config.sessionId,
     categories: config.categories,
     topK: config.topK,
@@ -151,20 +197,12 @@ function normalizeMessages(messages: unknown): Message[] {
   })
 }
 
-function resolveUserId(context: RuntimeContext | undefined, config: PluginConfig, override?: unknown): string {
-  if (typeof override === "string" && override.trim()) {
-    return override
-  }
-
-  return context?.sessionKey ?? config.userId
-}
-
 function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, override?: unknown): string {
   if (typeof override === "string" && override.trim()) {
     return override
   }
 
-  return context.userId ?? config.userId
+  return context.userId ?? config.userId ?? "default"
 }
 
 function normalizeConfig(config?: PluginConfig): PluginConfig {
@@ -199,7 +237,8 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
         timeoutMs: config?.llm?.config?.timeoutMs,
       },
     },
-    userId: config?.userId ?? "default",
+    // userId is now optional — omit from defaults so partition key derives it from the session key
+    userId: config?.userId,
     sessionId: config?.sessionId,
     autoRecall: config?.autoRecall ?? true,
     autoCapture: config?.autoCapture ?? true,
@@ -213,7 +252,7 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
 
 export const configSchema = {
   type: "object",
-  required: ["storage", "embedder", "llm", "userId"],
+  required: ["storage", "embedder", "llm"],
   properties: {
     storage: {
       type: "object",
@@ -292,6 +331,11 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   let managerPromise: Promise<MemoryManager> | null = null
   const processedSessionIds = new Set<string>()
 
+  // Load device prefix once at startup. Cached as a promise so all callers await the same result.
+  const devicePrefixPromise: Promise<string> = dependencies.devicePrefix !== undefined
+    ? Promise.resolve(dependencies.devicePrefix)
+    : loadDevicePrefix()
+
   function getManager(): Promise<MemoryManager> {
     if (!managerPromise) {
       managerPromise = createManager(config, logger, dependencies)
@@ -300,11 +344,16 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   }
 
   async function search(input: ToolInput, ctx: ToolContext = {}) {
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "memory_search tool", async () => {
       const manager = await getManager()
+      // Honour explicit userId override as the full key
+      const userId = typeof input.userId === "string" && input.userId.trim()
+        ? input.userId
+        : resolvePartitionKey(devicePrefix, ctx, config)
       return manager.search(String(input.query ?? ""), {
         topK: typeof input.topK === "number" ? input.topK : config.topK,
-        user_id: resolveUserId(ctx, config, input.userId),
+        user_id: userId,
         session_id: typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
         categories: Array.isArray(input.categories)
           ? input.categories.filter((item): item is string => typeof item === "string")
@@ -314,11 +363,15 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   }
 
   async function add(input: ToolInput, ctx: ToolContext = {}) {
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "memory_add tool", async () => {
       const manager = await getManager()
+      const userId = typeof input.userId === "string" && input.userId.trim()
+        ? input.userId
+        : resolvePartitionKey(devicePrefix, ctx, config)
       return manager.add(
         String(input.text ?? ""),
-        resolveUserId(ctx, config, input.userId),
+        userId,
         typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
         Array.isArray(input.categories)
           ? input.categories.filter((item): item is string => typeof item === "string")
@@ -336,10 +389,14 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   }
 
   async function list(input: ToolInput, ctx: ToolContext = {}) {
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "memory_list tool", async () => {
       const manager = await getManager()
+      const userId = typeof input.userId === "string" && input.userId.trim()
+        ? input.userId
+        : resolvePartitionKey(devicePrefix, ctx, config)
       return manager.list({
-        user_id: resolveUserId(ctx, config, input.userId),
+        user_id: userId,
         session_id: typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
         categories: Array.isArray(input.categories)
           ? input.categories.filter((item): item is string => typeof item === "string")
@@ -353,6 +410,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       return
     }
 
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "before_prompt_build", async () => {
       if (!event.prompt || event.prompt.length < 5) {
         return
@@ -362,7 +420,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       const memories = await withTimeout(
         manager.recall(event.prompt, {
           topK: config.topK ?? 10,
-          user_id: resolveUserId(ctx, config),
+          user_id: resolvePartitionKey(devicePrefix, ctx, config),
           session_id: ctx?.sessionKey ?? config.sessionId,
         }),
         config.recallTimeout ?? 10_000,
@@ -389,6 +447,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       return
     }
 
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "agent_end", async () => {
       const messages = normalizeMessages(event.messages)
       if (!messages.length) {
@@ -396,21 +455,23 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       }
 
       const manager = await getManager()
+      const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
       const facts = await withTimeout(
         manager.capture(messages, {
-          userId: resolveUserId(ctx, config),
+          userId: partitionKey,
           sessionId: ctx?.sessionKey ?? config.sessionId,
           categories: config.categories,
         }),
         config.captureTimeout ?? 15_000,
         "memory capture",
       )
-      logger?.info?.(`[clawd-remember] captured ${facts.length} facts for user ${resolveUserId(ctx, config)}`)
+      logger?.info?.(`[clawd-remember] captured ${facts.length} facts for user ${partitionKey}`)
     }, undefined)
   }
 
   async function beforeReset(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "before_reset", async () => {
       const messages = normalizeMessages(event.messages)
       if (!messages.length) return
@@ -419,7 +480,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       const manager = await getManager()
       const facts = await withTimeout(
         manager.capture(messages, {
-          userId: resolveUserId(ctx, config),
+          userId: resolvePartitionKey(devicePrefix, ctx, config),
           sessionId: sessionKey || config.sessionId,
           categories: config.categories,
         }),
@@ -433,6 +494,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   async function sessionEnd(event: { sessionFile?: string; sessionId: string; reason?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
     if (processedSessionIds.has(event.sessionId)) return
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "session_end", async () => {
       if (!event.sessionFile) return
       const fs = await import("node:fs/promises")
@@ -459,7 +521,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       const manager = await getManager()
       const facts = await withTimeout(
         manager.capture(messages, {
-          userId: resolveUserId(ctx, config),
+          userId: resolvePartitionKey(devicePrefix, ctx, config),
           sessionId: ctx.sessionKey ?? config.sessionId,
           categories: config.categories,
         }),
@@ -472,13 +534,14 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
 
   async function beforeCompaction(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
+    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "before_compaction", async () => {
       const messages = normalizeMessages(event.messages)
       if (!messages.length) return
       const manager = await getManager()
       const facts = await withTimeout(
         manager.capture(messages, {
-          userId: resolveUserId(ctx, config),
+          userId: resolvePartitionKey(devicePrefix, ctx, config),
           sessionId: ctx.sessionKey ?? config.sessionId,
           categories: config.categories,
         }),

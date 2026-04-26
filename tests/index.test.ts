@@ -260,7 +260,8 @@ describe("normalizeConfig", () => {
         provider: "openai-compatible",
         config: { baseURL: "http://localhost:4141/v1", model: "gpt-4o-mini", apiKey: "dummy" },
       },
-      userId: "default",
+      // userId is now undefined by default (partition key derived from session key)
+      // userId: undefined,
       autoRecall: true,
       autoCapture: true,
       topK: 10,

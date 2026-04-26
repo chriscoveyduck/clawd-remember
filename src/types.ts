@@ -97,7 +97,8 @@ export interface PluginConfig {
           timeoutMs?: number
         }
       }
-  userId: string
+  /** Optional override for the agent name portion of the partition key (Level 2). */
+  userId?: string
   sessionId?: string
   autoRecall?: boolean
   autoCapture?: boolean
