@@ -260,6 +260,10 @@ function normalizeMessages(messages: unknown): Message[] {
   })
 }
 
+function filterExtractableMessages(messages: Message[]): Message[] {
+  return messages.filter((message) => message.role !== "toolResult" && message.role !== "tool")
+}
+
 function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, override?: unknown): string {
   if (typeof override === "string" && override.trim()) {
     return override
@@ -320,7 +324,7 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     topK: config?.topK ?? 10,
     deduplicationThreshold: config?.deduplicationThreshold,
     recallTimeout: config?.recallTimeout ?? 10_000,
-    captureTimeout: config?.captureTimeout ?? 15_000,
+    captureTimeout: config?.captureTimeout ?? 45_000,
     chunkSize: config?.chunkSize ?? 20,
     categories: config?.categories,
     useConversationAccess: config?.useConversationAccess ?? false,
@@ -464,24 +468,38 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     const devicePrefix = await devicePrefixPromise
     const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
     let nextWatermark = watermark
+    const normalizedChunkSize = Math.max(1, Math.floor(config.chunkSize ?? 20))
     const totalFacts = await withTimeout(
-      captureInChunks(
-        manager,
-        delta,
-        {
-          userId: partitionKey,
-          sessionId: sessionKey,
-          categories: config.categories,
-        },
-        config.chunkSize ?? 20,
-        async (chunk) => {
+      (async () => {
+        let capturedFacts = 0
+
+        for (let start = 0; start < delta.length; start += normalizedChunkSize) {
+          const chunk = delta.slice(start, start + normalizedChunkSize)
+          // Filter out tool results; they are large and contain no useful memory signal.
+          const filterable = filterExtractableMessages(chunk)
+
+          if (filterable.length) {
+            capturedFacts += await captureInChunks(
+              manager,
+              filterable,
+              {
+                userId: partitionKey,
+                sessionId: sessionKey,
+                categories: config.categories,
+              },
+              normalizedChunkSize,
+            )
+          }
+
           nextWatermark += chunk.length
           if (sessionKey) {
             await storage.upsertWatermark(sessionKey, nextWatermark)
           }
-        },
-      ),
-      config.captureTimeout ?? 15_000,
+        }
+
+        return capturedFacts
+      })(),
+      config.captureTimeout ?? 45_000,
       scope,
     )
 

@@ -303,7 +303,7 @@ describe("normalizeConfig", () => {
       topK: 10,
       deduplicationThreshold: undefined,
       recallTimeout: 10000,
-      captureTimeout: 15000,
+      captureTimeout: 45000,
       chunkSize: 20,
     })
   })
@@ -353,9 +353,30 @@ describe("normalizeConfig", () => {
       topK: 10,
       deduplicationThreshold: 0.95,
       recallTimeout: 10000,
-      captureTimeout: 15000,
+      captureTimeout: 45000,
       chunkSize: 20,
     })
+  })
+
+  it("uses 45000ms as the default capture timeout when not configured", async () => {
+    const setTimeoutSpy = jest.spyOn(global, "setTimeout")
+    const plugin = createPlugin({
+      createStorageProvider: () => new InMemoryStorageProvider(),
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => new RecordingExtractor(),
+    })
+
+    await plugin.hooks.after_agent_turn({
+      config: {
+        ...buildConfig(),
+        captureTimeout: undefined,
+      },
+      messages: [{ role: "user", content: "User likes tea" }],
+      logger: { warn: jest.fn() },
+    })
+
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 45000)
+    setTimeoutSpy.mockRestore()
   })
 })
 
@@ -439,6 +460,57 @@ describe("message normalization", () => {
     expect(storage.watermarkUpdates.map((item) => item.watermark)).toEqual([2, 4, 5])
     const state = await storage.getSessionState("agent:main:test:1")
     expect(state).toMatchObject({ watermark: 5, completedAt: null })
+  })
+
+  it("filters tool messages before extraction", async () => {
+    const extractor = new RecordingExtractor()
+    const plugin = createPlugin({
+      createStorageProvider: () => new InMemoryStorageProvider(),
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => extractor,
+    })
+
+    await plugin.hooks.after_agent_turn({
+      config: buildConfig(),
+      messages: [
+        { role: "user", content: "m1" },
+        { role: "toolResult", content: "large tool payload" },
+        { role: "tool", content: "tool invocation" },
+        { role: "assistant", content: "m2" },
+      ],
+      logger: { warn: jest.fn() },
+    })
+
+    expect(extractor.seen).toEqual([
+      { role: "user", content: "m1" },
+      { role: "assistant", content: "m2" },
+    ])
+  })
+
+  it("advances the watermark when a delta chunk only contains tool messages", async () => {
+    const storage = new RecordingStorageProvider()
+    const extractor = new ChunkRecordingExtractor()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => extractor,
+      devicePrefix: "testdevice01",
+    })
+
+    await plugin.hooks.after_agent_turn({
+      config: buildConfig({ chunkSize: 2 }),
+      sessionId: "agent:main:test:tool-only",
+      messages: [
+        { role: "toolResult", content: "payload-1" },
+        { role: "tool", content: "payload-2" },
+      ],
+      logger: { warn: jest.fn() },
+    })
+
+    expect(extractor.chunkSizes).toEqual([])
+    expect(storage.watermarkUpdates.map((item) => item.watermark)).toEqual([2])
+    const state = await storage.getSessionState("agent:main:test:tool-only")
+    expect(state).toMatchObject({ watermark: 2, completedAt: null })
   })
 
   it("beforeReset marks the session completed after capture", async () => {
