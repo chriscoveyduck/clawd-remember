@@ -58,6 +58,9 @@ type LegacyHookContext = {
   agentId?: string
 }
 
+export const CLAWD_REMEMBER_CONTEXT_START = "CLAWD_REMEMBER_CONTEXT_START"
+export const CLAWD_REMEMBER_CONTEXT_END = "CLAWD_REMEMBER_CONTEXT_END"
+
 /**
  * Load (or generate and persist) the stable instance ID used as the Level 1 partition prefix.
  *
@@ -263,6 +266,28 @@ function normalizeMessages(messages: unknown): Message[] {
 
 function filterExtractableMessages(messages: Message[]): Message[] {
   return messages.filter((message) => message.role !== "toolResult" && message.role !== "tool")
+}
+
+export function stripRecalledContext(messages: Message[]): Message[] {
+  return messages.map((message) => {
+    if (typeof message.content !== "string") {
+      return message
+    }
+
+    const start = message.content.indexOf(CLAWD_REMEMBER_CONTEXT_START)
+    const end = message.content.indexOf(CLAWD_REMEMBER_CONTEXT_END)
+    if (start === -1 || end === -1) {
+      return message
+    }
+
+    const before = message.content.slice(0, start).trim()
+    const after = message.content.slice(end + CLAWD_REMEMBER_CONTEXT_END.length).trim()
+
+    return {
+      ...message,
+      content: [before, after].filter(Boolean).join("\n\n"),
+    }
+  })
 }
 
 function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, override?: unknown): string {
@@ -473,7 +498,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     }
 
     const watermark = Math.min(state?.watermark ?? 0, messages.length)
-    const delta = messages.slice(watermark)
+    const delta = stripRecalledContext(messages.slice(watermark))
     if (!delta.length) {
       if (options.forceWatermarkToLength && sessionKey) {
         await storage.upsertWatermark(sessionKey, messages.length)
@@ -702,7 +727,13 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
 
       logger?.info?.(`[clawd-remember] recalled ${memories.length} memories for prompt`)
 
-      return { prependContext: block }
+      return {
+        prependContext: [
+          CLAWD_REMEMBER_CONTEXT_START,
+          block,
+          CLAWD_REMEMBER_CONTEXT_END,
+        ].join("\n"),
+      }
     }, undefined)
   }
 

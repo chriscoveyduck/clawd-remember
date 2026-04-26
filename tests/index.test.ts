@@ -1,6 +1,12 @@
 import { describe, expect, it, jest } from "@jest/globals"
 
-import { captureInChunks, createPlugin } from "../src/index.js"
+import {
+  captureInChunks,
+  CLAWD_REMEMBER_CONTEXT_END,
+  CLAWD_REMEMBER_CONTEXT_START,
+  createPlugin,
+  stripRecalledContext,
+} from "../src/index.js"
 import type { Embedder, FactPayload, Filters, LLMExtractor, Message, PluginConfig, SearchResult, SessionCaptureState, StorageProvider } from "../src/types.js"
 import { cosineSimilarity } from "../src/utils.js"
 import { MockEmbedder, InMemoryStorageProvider } from "./helpers.js"
@@ -240,6 +246,8 @@ describe("plugin entry", () => {
     await plugin.hooks.after_agent_turn(baseContext)
     const updated = await plugin.hooks.before_prompt_build(baseContext)
 
+    expect(updated.prompt).toContain(CLAWD_REMEMBER_CONTEXT_START)
+    expect(updated.prompt).toContain(CLAWD_REMEMBER_CONTEXT_END)
     expect(updated.prompt).toContain("Relevant memory:")
   })
 
@@ -559,6 +567,32 @@ describe("normalizeConfig", () => {
 })
 
 describe("message normalization", () => {
+  it("stripRecalledContext removes recalled context and preserves the real message content", () => {
+    const stripped = stripRecalledContext([
+      {
+        role: "user",
+        content: [
+          CLAWD_REMEMBER_CONTEXT_START,
+          "Relevant memory:\n- User likes tea",
+          CLAWD_REMEMBER_CONTEXT_END,
+          "",
+          "What drink does the user prefer?",
+        ].join("\n"),
+      },
+    ])
+
+    expect(stripped).toEqual([{ role: "user", content: "What drink does the user prefer?" }])
+  })
+
+  it("stripRecalledContext is a no-op when messages do not include recalled context", () => {
+    const messages: Message[] = [
+      { role: "user", content: "What drink does the user prefer?" },
+      { role: "assistant", content: "The user likes tea." },
+    ]
+
+    expect(stripRecalledContext(messages)).toEqual(messages)
+  })
+
   it("normalizes array content blocks and filters invalid messages", async () => {
     const extractor = new RecordingExtractor()
     const plugin = createPlugin({
@@ -663,6 +697,47 @@ describe("message normalization", () => {
       { role: "user", content: "m1" },
       { role: "assistant", content: "m2" },
     ])
+  })
+
+  it("does not re-extract recalled memory context after it is prepended to the prompt", async () => {
+    const storage = new InMemoryStorageProvider()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => new TestExtractor(),
+    })
+    const logger = { warn: jest.fn() }
+    const baseContext = {
+      config: buildConfig(),
+      sessionId: "agent:main:test:recalled-context",
+      messages: [{ role: "user", content: "User likes tea" }],
+      prompt: "What drink does the user prefer?",
+      logger,
+    }
+    const listTool = plugin.tools.find((tool) => tool.name === "memory_list")
+
+    await plugin.hooks.after_agent_turn(baseContext)
+    const promptWithRecall = await plugin.hooks.before_prompt_build(baseContext)
+    expect(promptWithRecall.prompt).toBeDefined()
+
+    await plugin.hooks.after_agent_turn({
+      ...baseContext,
+      messages: [
+        ...baseContext.messages,
+        { role: "user", content: promptWithRecall.prompt ?? "" },
+      ],
+    })
+
+    const results = await listTool?.execute({}, { config: buildConfig(), sessionId: baseContext.sessionId, logger }) as Array<{ data: string }>
+
+    expect(results.map((item) => item.data)).toEqual(expect.arrayContaining([
+      "Fact: User likes tea",
+      "Fact: What drink does the user prefer?",
+    ]))
+    expect(results).toHaveLength(2)
+    expect(results.map((item) => item.data).join("\n")).not.toContain("Relevant memory:")
+    expect(results.map((item) => item.data).join("\n")).not.toContain(CLAWD_REMEMBER_CONTEXT_START)
+    expect(results.map((item) => item.data).join("\n")).not.toContain(CLAWD_REMEMBER_CONTEXT_END)
   })
 
   it("advances the watermark when a delta chunk only contains tool messages", async () => {
