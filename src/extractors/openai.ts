@@ -22,7 +22,8 @@ export class OpenAICompatibleExtractor implements LLMExtractor {
 
   public async extract(conversation: Message[]): Promise<string[]> {
     const run = async (): Promise<string[]> => {
-      const response = await fetch(new URL("/chat/completions", this.config.baseURL), {
+      const url = this.config.baseURL.replace(/\/$/, "") + "/chat/completions"
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
