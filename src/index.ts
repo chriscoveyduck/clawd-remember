@@ -5,6 +5,7 @@ import path from "node:path"
 
 import { MemoryManager } from "./memory.js"
 import { OllamaEmbedder } from "./embedders/ollama.js"
+import { OpenAIEmbedder } from "./embedders/openai.js"
 import { OpenAICompatibleExtractor } from "./extractors/openai.js"
 import { SqliteStorageProvider } from "./storage/sqlite.js"
 import type { Embedder, LLMExtractor, Message, PluginConfig, RecallOptions, StorageProvider } from "./types.js"
@@ -115,7 +116,7 @@ async function createManager(
   dependencies: PluginDependencies = {},
 ): Promise<MemoryManager> {
   const storage = (dependencies.createStorageProvider ?? createStorageProvider)(config)
-  const embedder = (dependencies.createEmbedder ?? ((currentConfig) => new OllamaEmbedder(currentConfig.embedder.config)))(config)
+  const embedder = (dependencies.createEmbedder ?? createEmbedder)(config)
   const extractor = (dependencies.createExtractor ?? ((currentConfig) => {
     if (currentConfig.llm.provider !== "openai-compatible") {
       throw new Error(`Unsupported LLM provider for extraction: ${currentConfig.llm.provider}`)
@@ -147,6 +148,14 @@ function createStorageProvider(config: PluginConfig): SqliteStorageProvider {
   }
 
   throw new Error(`Storage provider ${config.storage.provider} is not implemented yet`)
+}
+
+function createEmbedder(config: PluginConfig): Embedder {
+  if (config.embedder.provider === "openai") {
+    return new OpenAIEmbedder(config.embedder.config)
+  }
+  // Default: ollama
+  return new OllamaEmbedder(config.embedder.config as Parameters<typeof OllamaEmbedder.prototype.embed>[never] extends never ? never : ConstructorParameters<typeof OllamaEmbedder>[0])
 }
 
 function warn(context: RuntimeContext | undefined, scope: string, error: unknown): void {
@@ -230,28 +239,40 @@ function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, o
 }
 
 function normalizeConfig(config?: PluginConfig): PluginConfig {
-  const storage = config?.storage?.provider === "mariadb"
-    ? {
-      provider: "mariadb" as const,
-      config: config.storage.config,
-    }
-    : {
-      provider: "sqlite" as const,
-      config: config?.storage?.provider === "sqlite"
-        ? config.storage.config
-        : { path: "~/.openclaw/clawd-remember.db" },
-    }
+  // Normalize storage — only sqlite is supported
+  const storage = {
+    provider: "sqlite" as const,
+    config: config?.storage?.provider === "sqlite"
+      ? config.storage.config
+      : { path: "~/.openclaw/clawd-remember.db" },
+  }
 
-  return {
-    storage,
-    embedder: {
+  // Normalize embedder — support ollama and openai
+  let embedder: PluginConfig["embedder"]
+  if (config?.embedder?.provider === "openai") {
+    embedder = {
+      provider: "openai",
+      config: {
+        baseURL: config.embedder.config.baseURL ?? "https://api.openai.com/v1",
+        model: config.embedder.config.model ?? "text-embedding-3-small",
+        apiKey: config.embedder.config.apiKey ?? "dummy",
+        timeoutMs: config.embedder.config.timeoutMs,
+      },
+    }
+  } else {
+    embedder = {
       provider: "ollama",
       config: {
         url: config?.embedder?.config?.url ?? "http://localhost:11434",
-        model: config?.embedder?.config?.model ?? "nomic-embed-text",
+        model: (config?.embedder?.provider === "ollama" ? config.embedder.config.model : undefined) ?? "nomic-embed-text",
         timeoutMs: config?.embedder?.config?.timeoutMs,
       },
-    },
+    }
+  }
+
+  return {
+    storage,
+    embedder,
     llm: {
       provider: "openai-compatible",
       config: {
@@ -282,19 +303,14 @@ export const configSchema = {
       type: "object",
       required: ["provider", "config"],
       properties: {
-        provider: { type: "string", enum: ["sqlite", "mariadb"] },
+        provider: { type: "string", enum: ["sqlite"] },
         config: {
           type: "object",
           properties: {
             path: { type: "string" },
-            host: { type: "string" },
-            port: { type: "number" },
-            user: { type: "string" },
-            password: { type: "string" },
-            database: { type: "string" },
-            table: { type: "string" },
+            dimensions: { type: "number" },
           },
-          additionalProperties: true,
+          additionalProperties: false,
         },
       },
       additionalProperties: false,
@@ -303,14 +319,15 @@ export const configSchema = {
       type: "object",
       required: ["provider", "config"],
       properties: {
-        provider: { type: "string", enum: ["ollama"] },
+        provider: { type: "string", enum: ["ollama", "openai"] },
         config: {
           type: "object",
-          required: ["url", "model"],
           properties: {
             url: { type: "string" },
             model: { type: "string" },
             timeoutMs: { type: "number" },
+            baseURL: { type: "string" },
+            apiKey: { type: "string" },
           },
           additionalProperties: false,
         },
@@ -558,10 +575,14 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
 
   async function beforeCompaction(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
+    // Dedup guard: skip if this session was already processed by before_reset or session_end
+    const sessionKey = ctx.sessionKey ?? ""
+    if (sessionKey && processedSessionIds.has(sessionKey)) return
     const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "before_compaction", async () => {
       const messages = normalizeMessages(event.messages)
       if (!messages.length) return
+      if (sessionKey) processedSessionIds.add(sessionKey)
       const manager = await getManager()
       const facts = await withTimeout(
         manager.capture(messages, {
@@ -667,7 +688,7 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
 export default definePluginEntry({
   id: "clawd-remember",
   name: "clawd-remember",
-  description: "Self-hosted memory plugin using Postgres/SQLite + Ollama",
+  description: "Self-hosted memory plugin using SQLite + Ollama or OpenAI embeddings",
   register(api) {
     const cfg = normalizeConfig(api.pluginConfig as unknown as PluginConfig)
     const logger = api.logger
@@ -772,4 +793,5 @@ export * from "./types.js"
 export * from "./memory.js"
 export * from "./storage/sqlite.js"
 export * from "./embedders/ollama.js"
+export * from "./embedders/openai.js"
 export * from "./extractors/openai.js"

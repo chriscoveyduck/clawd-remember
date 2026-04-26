@@ -11,19 +11,20 @@ Built because the existing options have reliability problems. Designed to be the
 ## Features
 
 - 🔍 **Semantic search** — query memories by meaning, not just keywords
-- 🗄️ **Pluggable storage** — SQLite today, MariaDB next
-- 🧠 **Ollama embeddings** — local embedding generation with configurable endpoint and model
-- 🤖 **OpenAI-compatible fact extraction** — use any compatible chat completion API
-- 🔒 **Fully self-hosted** — your data never leaves your server
-- ⚡ **No telemetry** — zero phone-home, ever
+- 🗄️ **SQLite storage** — embedded, zero-config, production-ready via sqlite-vec
+- 🧠 **Ollama embeddings** — local embedding generation, fully private
+- 🤖 **OpenAI embeddings** — `text-embedding-3-small` via OpenAI API (or compatible endpoint)
+- 🔬 **OpenAI-compatible fact extraction** — LLM extraction via `gpt-4o-mini` or any compatible model
 - 🧩 **OpenClaw memory slot compatible** — drop-in replacement for `openclaw-mem0`
 - 🪶 **Lightweight** — minimal dependencies, no SDK bloat
+
+> **Note on privacy:** OpenAI is used by default for both LLM extraction (`gpt-4o-mini`) and embeddings (`text-embedding-3-small`). Your conversation content is sent to OpenAI's API for processing. If you want a fully local deployment, configure the LLM extractor to point at a local OpenAI-compatible endpoint (e.g. Ollama, LM Studio) and use the `ollama` embedder provider.
 
 ---
 
 ## Why clawd-remember?
 
-Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to self-host reliably. clawd-remember takes a different approach: a minimal, auditable codebase with no telemetry, no unnecessary dependencies, and storage backends that are easy to run and maintain.
+Existing OpenClaw memory solutions can be complex, heavyweight, and difficult to self-host reliably. clawd-remember takes a different approach: a minimal, auditable codebase with no unnecessary dependencies, and storage backends that are easy to run and maintain.
 
 ---
 
@@ -56,7 +57,6 @@ Add to your `openclaw.json`:
       "clawd-remember": {
         "enabled": true,
         "config": {
-          "userId": "your-user-id",
           "autoRecall": true,
           "autoCapture": true,
           "storage": {
@@ -66,18 +66,19 @@ Add to your `openclaw.json`:
             }
           },
           "embedder": {
-            "provider": "ollama",
+            "provider": "openai",
             "config": {
-              "url": "http://localhost:11434",
-              "model": "nomic-embed-text"
+              "baseURL": "https://api.openai.com/v1",
+              "apiKey": "sk-...",
+              "model": "text-embedding-3-small"
             }
           },
           "llm": {
             "provider": "openai-compatible",
             "config": {
-              "baseURL": "http://localhost:4141/v1",
+              "baseURL": "https://api.openai.com/v1",
               "model": "gpt-4o-mini",
-              "apiKey": "dummy"
+              "apiKey": "sk-..."
             }
           }
         },
@@ -93,6 +94,30 @@ Add to your `openclaw.json`:
 }
 ```
 
+### Local-only (Ollama) example
+
+If you want to keep all processing local, point both the embedder and LLM extractor at Ollama:
+
+```json
+{
+  "embedder": {
+    "provider": "ollama",
+    "config": {
+      "url": "http://localhost:11434",
+      "model": "nomic-embed-text"
+    }
+  },
+  "llm": {
+    "provider": "openai-compatible",
+    "config": {
+      "baseURL": "http://localhost:11434/v1",
+      "model": "llama3",
+      "apiKey": "ollama"
+    }
+  }
+}
+```
+
 ---
 
 ## Configuration
@@ -102,25 +127,25 @@ Add to your `openclaw.json`:
 | Provider | Description | Extra deps |
 |----------|-------------|------------|
 | `sqlite` | Embedded SQLite with sqlite-vec extension | `better-sqlite3`, `sqlite-vec` |
-| `mariadb` | MariaDB / MySQL with vector support | `mysql2` |
 
 ### Embedder Providers
 
 | Provider | Description |
 |----------|-------------|
-| `ollama` | Local Ollama instance |
+| `ollama` | Local Ollama instance — fully private |
+| `openai` | OpenAI embeddings API (`text-embedding-3-small` by default) |
 
 ### LLM Providers
 
 | Provider | Description |
 |----------|-------------|
-| `openai-compatible` | Any OpenAI-compatible API (Copilot proxy, Ollama, etc.) |
+| `openai-compatible` | Any OpenAI-compatible API (OpenAI, Ollama, LM Studio, etc.) |
 
 ### Core Options
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `userId` | `default` | Owner id for stored facts |
+| `userId` | _(auto-derived)_ | Optional override for the agent partition key (Level 2). When omitted, the key is derived from the session/agent context. |
 | `sessionId` | unset | Optional session-scoped memory id |
 | `autoRecall` | `true` | Inject relevant memories before prompt build |
 | `autoCapture` | `true` | Extract and store facts after each agent turn |
@@ -133,7 +158,7 @@ Add to your `openclaw.json`:
 
 - `better-sqlite3` is an optional dependency. If it is missing, the plugin throws a helpful install error when SQLite storage is initialized.
 - All hook and tool operations are wrapped defensively so memory failures log warnings instead of crashing the agent turn.
-- MariaDB is declared in the config schema for forward compatibility, but `v0.1.0` only implements the SQLite backend.
+- Memory is partitioned by a two-level key: a stable instance UUID (Level 1) and the agent ID derived from the session key (Level 2). This means memories are isolated per deployment and per agent by default.
 
 ---
 
@@ -146,8 +171,8 @@ User message
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
 │  LLM        │────▶│  Embedder    │────▶│  Storage    │
 │  Extractor  │     │  (Ollama /   │     │  (SQLite /  │
-│             │     │   OpenAI)    │     │   Maria /   │
-│  Extracts   │     │              │     │   Postgres) │
+│             │     │   OpenAI)    │     │   sqlite-   │
+│  Extracts   │     │              │     │   vec)      │
 │  facts from │     │  Vectorises  │     │             │
 │  conversation    │  facts       │     │  Stores &   │
 └─────────────┘     └──────────────┘     │  searches   │
@@ -181,8 +206,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 - [x] SQLite + sqlite-vec storage backend
 - [x] Ollama embedder
+- [x] OpenAI embedder (`text-embedding-3-small`)
 - [x] OpenAI-compatible LLM extractor
-- [x] GitHub Copilot LLM extractor
 - [x] Auto-recall (inject memories before agent turn)
 - [x] Auto-capture (extract facts after agent turn)
 - [x] `memory_search` tool
@@ -190,14 +215,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 - [x] `memory_delete` tool
 - [x] `memory_list` tool
 - [x] Session-scoped vs long-term memory
+- [x] Two-level partition keys (instance UUID + agent ID)
 - [ ] PostgreSQL storage backend
 - [ ] Memory consolidation / deduplication
 - [ ] Cross-project fact linking
 - [ ] ClaWHub publish
-
-### Future / Out of Scope
-
-MariaDB/PostgreSQL backends are planned for a future release.
 
 ---
 
