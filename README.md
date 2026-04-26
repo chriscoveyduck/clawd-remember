@@ -13,8 +13,8 @@
 - 🧠 **Ollama embeddings** — local embedding generation, fully private
 - 🤖 **OpenAI embeddings** — `text-embedding-3-small` via OpenAI API (or compatible endpoint)
 - 🔬 **OpenAI-compatible fact extraction** — LLM extraction via `gpt-4o-mini` or any compatible model
-- 🧩 **OpenClaw memory slot compatible** — drop-in replacement for `openclaw-mem0`
-- 🪶 **Lightweight** — minimal dependencies, no SDK bloat
+- 🧩 **OpenClaw memory slot** — registers as a first-class memory slot plugin
+- 🪶 **Minimal dependencies** — TypeScript, sqlite-vec, and nothing else
 
 > **Note on privacy:** OpenAI is used by default for both LLM extraction (`gpt-4o-mini`) and embeddings (`text-embedding-3-small`). Your conversation content is sent to OpenAI's API for processing. If you want a fully local deployment, configure the LLM extractor to point at a local OpenAI-compatible endpoint (e.g. Ollama, LM Studio) and use the `ollama` embedder provider.
 
@@ -229,4 +229,4 @@ MIT — see [LICENSE](LICENSE)
 
 ## Credits
 
-Built by [Chris Coveyduck](https://github.com/chriscoveyduck) with [Skippy the Magnificent](https://openclaw.ai) 🎩.
+Built by [Chris Coveyduck](https://github.com/chriscoveyduck).
