@@ -2,11 +2,13 @@ import type { LLMExtractor, Message, OpenAICompatibleConfig } from "../types.js"
 import { withTimeout } from "../utils.js"
 
 const SYSTEM_PROMPT = [
-  "Extract discrete third-person facts from the conversation.",
-  "Return only facts that are useful for future recall.",
-  "Avoid instructions, preferences implied only weakly, or speculative claims.",
-  "Each fact must be standalone and concise.",
-  "Respond with JSON in the form {\"facts\":[\"...\"]}.",
+  "You are extracting long-term memory facts for a personal AI assistant.",
+  "Extract only facts that would be genuinely useful to recall in a future conversation —",
+  "user preferences, decisions made, project context, key people, recurring topics, and lessons learned.",
+  "Ignore: session metadata, timestamps, tool call details, transient state, bug investigation details,",
+  "anything already common knowledge, and anything that won't be meaningful outside this specific conversation.",
+  "Each fact must be standalone, concise, and written as a statement.",
+  'Return JSON: {"facts":["..."]}.',
 ].join(" ")
 
 type ChatCompletionResponse = {
