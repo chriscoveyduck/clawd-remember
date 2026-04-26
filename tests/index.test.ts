@@ -301,6 +301,7 @@ describe("normalizeConfig", () => {
       autoRecall: true,
       autoCapture: true,
       topK: 10,
+      deduplicationThreshold: undefined,
       recallTimeout: 10000,
       captureTimeout: 15000,
       chunkSize: 20,
@@ -333,6 +334,7 @@ describe("normalizeConfig", () => {
       },
       userId: "user-9",
       autoCapture: false,
+      deduplicationThreshold: 0.95,
     } as PluginConfig
 
     const searchTool = plugin.tools.find((tool) => tool.name === "memory_search")
@@ -349,6 +351,7 @@ describe("normalizeConfig", () => {
       autoRecall: true,
       autoCapture: false,
       topK: 10,
+      deduplicationThreshold: 0.95,
       recallTimeout: 10000,
       captureTimeout: 15000,
       chunkSize: 20,

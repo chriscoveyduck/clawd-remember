@@ -94,6 +94,7 @@ export interface PluginConfig {
   autoRecall?: boolean
   autoCapture?: boolean
   topK?: number
+  deduplicationThreshold?: number
   recallTimeout?: number
   captureTimeout?: number
   chunkSize?: number

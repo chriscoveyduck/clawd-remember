@@ -16,6 +16,7 @@ export interface MemoryManagerConfig {
   sessionId?: string
   categories?: string[]
   topK?: number
+  deduplicationThreshold?: number
 }
 
 export class MemoryManager {
@@ -42,6 +43,14 @@ export class MemoryManager {
         options.categories ?? this.config.categories,
       )
       const vector = await this.embedder.embed(payload.data)
+      const similar = await this.storage.search(vector, 1, {
+        user_id: options.userId ?? this.config.userId,
+      })
+
+      if (similar.length > 0 && similar[0].score >= (this.config.deduplicationThreshold ?? 0.92)) {
+        continue
+      }
+
       await this.storage.insert(payload.id, vector, payload)
       const stored = await this.storage.get(payload.id)
       created.push(stored ?? payload)
