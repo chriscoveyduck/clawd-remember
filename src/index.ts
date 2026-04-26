@@ -673,8 +673,9 @@ export default definePluginEntry({
     const logger = api.logger
     const runtime = createRuntime(cfg, logger)
 
-    api.registerTool({
+    api.registerTool(((ctx: OpenClawPluginToolContext) => ({
       name: "memory_search",
+      label: "Search memories",
       description: "Search stored memories",
       parameters: {
         type: "object",
@@ -687,13 +688,14 @@ export default definePluginEntry({
           categories: { type: "array", items: { type: "string" } },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
-        return runtime.search((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
+      async execute(_toolCallId: string, input: unknown) {
+        return runtime.search((input ?? {}) as ToolInput, { logger, sessionKey: ctx.sessionKey, agentId: ctx.agentId })
       },
-    } as unknown as Parameters<typeof api.registerTool>[0])
+    })) as unknown as Parameters<typeof api.registerTool>[0])
 
-    api.registerTool({
+    api.registerTool(((ctx: OpenClawPluginToolContext) => ({
       name: "memory_add",
+      label: "Add memory",
       description: "Add a memory",
       parameters: {
         type: "object",
@@ -705,13 +707,14 @@ export default definePluginEntry({
           categories: { type: "array", items: { type: "string" } },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
-        return runtime.add((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
+      async execute(_toolCallId: string, input: unknown) {
+        return runtime.add((input ?? {}) as ToolInput, { logger, sessionKey: ctx.sessionKey, agentId: ctx.agentId })
       },
-    } as unknown as Parameters<typeof api.registerTool>[0])
+    })) as unknown as Parameters<typeof api.registerTool>[0])
 
-    api.registerTool({
+    api.registerTool(((ctx: OpenClawPluginToolContext) => ({
       name: "memory_delete",
+      label: "Delete memory",
       description: "Delete a memory by id",
       parameters: {
         type: "object",
@@ -720,13 +723,14 @@ export default definePluginEntry({
           id: { type: "string" },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
-        return runtime.remove((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
+      async execute(_toolCallId: string, input: unknown) {
+        return runtime.remove((input ?? {}) as ToolInput, { logger, sessionKey: ctx.sessionKey, agentId: ctx.agentId })
       },
-    } as unknown as Parameters<typeof api.registerTool>[0])
+    })) as unknown as Parameters<typeof api.registerTool>[0])
 
-    api.registerTool({
+    api.registerTool(((ctx: OpenClawPluginToolContext) => ({
       name: "memory_list",
+      label: "List memories",
       description: "List stored memories",
       parameters: {
         type: "object",
@@ -737,10 +741,10 @@ export default definePluginEntry({
           categories: { type: "array", items: { type: "string" } },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
-        return runtime.list((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
+      async execute(_toolCallId: string, input: unknown) {
+        return runtime.list((input ?? {}) as ToolInput, { logger, sessionKey: ctx.sessionKey, agentId: ctx.agentId })
       },
-    } as unknown as Parameters<typeof api.registerTool>[0])
+    })) as unknown as Parameters<typeof api.registerTool>[0])
 
     api.on("before_prompt_build", async (event, ctx) => {
       return runtime.beforePromptBuild(event, ctx)
