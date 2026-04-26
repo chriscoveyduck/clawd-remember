@@ -1,4 +1,4 @@
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry"
+import { definePluginEntry, type OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry"
 import { parseAgentSessionKey } from "openclaw/plugin-sdk/routing"
 import os from "node:os"
 import path from "node:path"
@@ -19,6 +19,7 @@ type LoggerLike = {
 type RuntimeContext = {
   logger?: LoggerLike
   sessionKey?: string
+  agentId?: string
 }
 
 type ToolContext = RuntimeContext
@@ -44,6 +45,7 @@ type LegacyHookContext = {
   conversation?: Message[]
   userId?: string
   sessionId?: string
+  agentId?: string
 }
 
 /**
@@ -101,11 +103,10 @@ function resolvePartitionKey(
   devicePrefix: string,
   context: RuntimeContext | undefined,
   config: PluginConfig,
+  agentId?: string,
 ): string {
-  const sessionKey = context?.sessionKey
-  const parsedAgentId = sessionKey ? parseAgentSessionKey(sessionKey)?.agentId : undefined
-  const agentId = config.userId ?? parsedAgentId ?? "default"
-  return `${devicePrefix}:${agentId}`
+  const resolvedAgentId = config.userId ?? agentId ?? context?.agentId ?? parseAgentSessionKey(context?.sessionKey)?.agentId ?? "default"
+  return `${devicePrefix}:${resolvedAgentId}`
 }
 
 async function createManager(
@@ -225,7 +226,7 @@ function resolveLegacyUserId(context: LegacyHookContext, config: PluginConfig, o
     return override
   }
 
-  return context.userId ?? config.userId ?? "default"
+  return context.userId ?? context.agentId ?? config.userId ?? "default"
 }
 
 function normalizeConfig(config?: PluginConfig): PluginConfig {
@@ -610,7 +611,7 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
         const { runtime } = getRuntime(context)
         const result = await runtime.beforePromptBuild(
           { prompt: context.prompt ?? context.input },
-          { logger: context.logger, sessionKey: context.sessionId },
+          { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId },
         )
         if (!result?.prependContext) {
           return context
@@ -625,7 +626,7 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
         const { runtime } = getRuntime(context)
         await runtime.agentEnd(
           { messages: context.conversation ?? context.messages ?? [], success: (context as { success?: boolean }).success },
-          { logger: context.logger, sessionKey: context.sessionId },
+          { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId },
         )
         return context
       },
@@ -635,28 +636,28 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
         name: "memory_search",
         async execute(input: ToolInput, context: LegacyHookContext) {
           const { runtime } = getRuntime(context)
-          return runtime.search(input, { logger: context.logger, sessionKey: context.sessionId })
+          return runtime.search(input, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
         },
       },
       {
         name: "memory_add",
         async execute(input: ToolInput, context: LegacyHookContext) {
           const { runtime } = getRuntime(context)
-          return runtime.add(input, { logger: context.logger, sessionKey: context.sessionId })
+          return runtime.add(input, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
         },
       },
       {
         name: "memory_delete",
         async execute(input: ToolInput, context: LegacyHookContext) {
           const { runtime } = getRuntime(context)
-          return runtime.remove(input, { logger: context.logger, sessionKey: context.sessionId })
+          return runtime.remove(input, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
         },
       },
       {
         name: "memory_list",
         async execute(input: ToolInput, context: LegacyHookContext) {
           const { runtime } = getRuntime(context)
-          return runtime.list(input, { logger: context.logger, sessionKey: context.sessionId })
+          return runtime.list(input, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
         },
       },
     ],
@@ -686,8 +687,8 @@ export default definePluginEntry({
           categories: { type: "array", items: { type: "string" } },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
-        return runtime.search((input ?? {}) as ToolInput)
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
+        return runtime.search((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
       },
     } as unknown as Parameters<typeof api.registerTool>[0])
 
@@ -704,8 +705,8 @@ export default definePluginEntry({
           categories: { type: "array", items: { type: "string" } },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
-        return runtime.add((input ?? {}) as ToolInput)
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
+        return runtime.add((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
       },
     } as unknown as Parameters<typeof api.registerTool>[0])
 
@@ -719,8 +720,8 @@ export default definePluginEntry({
           id: { type: "string" },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
-        return runtime.remove((input ?? {}) as ToolInput)
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
+        return runtime.remove((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
       },
     } as unknown as Parameters<typeof api.registerTool>[0])
 
@@ -736,8 +737,8 @@ export default definePluginEntry({
           categories: { type: "array", items: { type: "string" } },
         },
       },
-      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown) {
-        return runtime.list((input ?? {}) as ToolInput)
+      async execute(_toolCallId: string, input: unknown, _signal?: AbortSignal, _onUpdate?: unknown, context?: OpenClawPluginToolContext) {
+        return runtime.list((input ?? {}) as ToolInput, { logger, sessionKey: context?.sessionKey, agentId: context?.agentId })
       },
     } as unknown as Parameters<typeof api.registerTool>[0])
 
