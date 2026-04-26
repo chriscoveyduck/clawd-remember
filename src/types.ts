@@ -106,8 +106,14 @@ export interface RecallOptions extends Filters {
   topK?: number
 }
 
+export interface SessionVectorCacheEntry {
+  hash: string
+  vector: number[]
+}
+
 export interface CaptureOptions {
   userId?: string
   sessionId?: string
   categories?: string[]
+  sessionVectorCache?: SessionVectorCacheEntry[]
 }

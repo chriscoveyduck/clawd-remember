@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@jest/globals"
 
 import { MemoryManager } from "../src/memory.js"
-import type { Embedder } from "../src/types.js"
+import type { Embedder, SessionVectorCacheEntry } from "../src/types.js"
 import { InMemoryStorageProvider, MockEmbedder, MockExtractor } from "./helpers.js"
 
 class SemanticTestEmbedder implements Embedder {
@@ -145,5 +145,118 @@ describe("MemoryManager", () => {
     expect(await manager.list({ user_id: "user-1" })).toHaveLength(1)
     expect(await manager.list({ user_id: "user-2" })).toHaveLength(1)
     expect(await manager.list()).toHaveLength(2)
+  })
+
+  it("prevents re-insertion of a deleted fact within the same session via the session cache", async () => {
+    const storage = new InMemoryStorageProvider()
+    const sessionVectorCache: SessionVectorCacheEntry[] = []
+    const firstCapture = new MemoryManager(
+      storage,
+      new MockEmbedder(),
+      new MockExtractor(["User likes tea"]),
+      { userId: "user-1" },
+    )
+    const secondCapture = new MemoryManager(
+      storage,
+      new MockEmbedder(),
+      new MockExtractor(["User likes tea"]),
+      { userId: "user-1" },
+    )
+
+    await firstCapture.init()
+    await secondCapture.init()
+
+    const created = await firstCapture.capture([{ role: "user", content: "remember this" }], {
+      sessionId: "session-1",
+      sessionVectorCache,
+    })
+    expect(created).toHaveLength(1)
+
+    await firstCapture.delete(created[0]!.id)
+    const recaptured = await secondCapture.capture([{ role: "user", content: "remember this again" }], {
+      sessionId: "session-1",
+      sessionVectorCache,
+    })
+
+    expect(recaptured).toHaveLength(0)
+    expect(await storage.list({ user_id: "user-1" })).toHaveLength(0)
+  })
+
+  it("uses the session cache to catch semantic near-duplicates after the original was deleted", async () => {
+    const storage = new InMemoryStorageProvider()
+    const sessionVectorCache: SessionVectorCacheEntry[] = []
+    const firstCapture = new MemoryManager(
+      storage,
+      new SemanticTestEmbedder(),
+      new MockExtractor(["User likes tea"]),
+      {
+        userId: "user-1",
+        deduplicationThreshold: 0.92,
+      },
+    )
+    const secondCapture = new MemoryManager(
+      storage,
+      new SemanticTestEmbedder(),
+      new MockExtractor(["User loves tea"]),
+      {
+        userId: "user-1",
+        deduplicationThreshold: 0.92,
+      },
+    )
+
+    await firstCapture.init()
+    await secondCapture.init()
+
+    const created = await firstCapture.capture([{ role: "user", content: "remember this" }], {
+      sessionId: "session-1",
+      sessionVectorCache,
+    })
+    await firstCapture.delete(created[0]!.id)
+
+    const recaptured = await secondCapture.capture([{ role: "user", content: "remember this differently" }], {
+      sessionId: "session-1",
+      sessionVectorCache,
+    })
+
+    expect(recaptured).toHaveLength(0)
+    expect(await storage.list({ user_id: "user-1" })).toHaveLength(0)
+  })
+
+  it("does not let the session cache block genuinely different facts", async () => {
+    const storage = new InMemoryStorageProvider()
+    const sessionVectorCache: SessionVectorCacheEntry[] = []
+    const firstCapture = new MemoryManager(
+      storage,
+      new SemanticTestEmbedder(),
+      new MockExtractor(["User likes tea"]),
+      {
+        userId: "user-1",
+        deduplicationThreshold: 0.92,
+      },
+    )
+    const secondCapture = new MemoryManager(
+      storage,
+      new SemanticTestEmbedder(),
+      new MockExtractor(["User has a bicycle"]),
+      {
+        userId: "user-1",
+        deduplicationThreshold: 0.92,
+      },
+    )
+
+    await firstCapture.init()
+    await secondCapture.init()
+
+    await firstCapture.capture([{ role: "user", content: "remember this" }], {
+      sessionId: "session-1",
+      sessionVectorCache,
+    })
+    const captured = await secondCapture.capture([{ role: "user", content: "remember this too" }], {
+      sessionId: "session-1",
+      sessionVectorCache,
+    })
+
+    expect(captured).toHaveLength(1)
+    expect(await storage.list({ user_id: "user-1" })).toHaveLength(2)
   })
 })

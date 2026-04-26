@@ -15,6 +15,7 @@ import type {
   Message,
   PluginConfig,
   RecallOptions,
+  SessionVectorCacheEntry,
   StorageProvider,
 } from "./types.js"
 import { withTimeout } from "./utils.js"
@@ -411,6 +412,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
   let managerPromise: Promise<MemoryManager> | null = null
   let storagePromise: Promise<StorageProvider> | null = null
   const compactionPending = new Set<string>()
+  const sessionExtractedVectors = new Map<string, SessionVectorCacheEntry[]>()
 
   // Load device prefix once at startup. Cached as a promise so all callers await the same result.
   const devicePrefixPromise: Promise<string> = dependencies.devicePrefix !== undefined
@@ -435,6 +437,21 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     return ctx.sessionKey ?? fallback ?? config.sessionId
   }
 
+  function getSessionVectorCache(sessionKey: string | undefined): SessionVectorCacheEntry[] | undefined {
+    if (!sessionKey) {
+      return undefined
+    }
+
+    const existing = sessionExtractedVectors.get(sessionKey)
+    if (existing) {
+      return existing
+    }
+
+    const created: SessionVectorCacheEntry[] = []
+    sessionExtractedVectors.set(sessionKey, created)
+    return created
+  }
+
   async function captureSessionDelta(
     scope: string,
     messages: Message[],
@@ -449,6 +466,9 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     const storage = await getStorage()
     const state = sessionKey ? await storage.getSessionState(sessionKey) : null
     if (state?.completedAt) {
+      if (sessionKey) {
+        sessionExtractedVectors.delete(sessionKey)
+      }
       return 0
     }
 
@@ -460,6 +480,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       }
       if (options.markCompleted && sessionKey) {
         await storage.markCompleted(sessionKey)
+        sessionExtractedVectors.delete(sessionKey)
       }
       return 0
     }
@@ -467,6 +488,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     const manager = await getManager()
     const devicePrefix = await devicePrefixPromise
     const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
+    const sessionVectorCache = getSessionVectorCache(sessionKey)
     let nextWatermark = watermark
     const normalizedChunkSize = Math.max(1, Math.floor(config.chunkSize ?? 20))
     const totalFacts = await withTimeout(
@@ -486,6 +508,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
                 userId: partitionKey,
                 sessionId: sessionKey,
                 categories: config.categories,
+                sessionVectorCache,
               },
               normalizedChunkSize,
             )
@@ -509,6 +532,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
 
     if (options.markCompleted && sessionKey) {
       await storage.markCompleted(sessionKey)
+      sessionExtractedVectors.delete(sessionKey)
     }
 
     logger?.info?.(`[clawd-remember] ${scope}: captured ${totalFacts} facts for user ${partitionKey}`)
@@ -575,6 +599,78 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
           : undefined,
       }, typeof input.topK === "number" ? input.topK : config.topK)
     }, [])
+  }
+
+  async function dedupe(input: ToolInput, ctx: ToolContext = {}) {
+    const devicePrefix = await devicePrefixPromise
+    return safeRun({ ...ctx, logger }, "memory_dedupe tool", async () => {
+      const manager = await getManager()
+      const userId = typeof input.userId === "string" && input.userId.trim()
+        ? input.userId
+        : resolvePartitionKey(devicePrefix, ctx, config)
+      const threshold = typeof input.threshold === "number" ? input.threshold : config.deduplicationThreshold ?? 0.92
+      const dryRun = input.dryRun === true
+      const memories = await manager.list({
+        user_id: userId,
+        session_id: typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
+        categories: Array.isArray(input.categories)
+          ? input.categories.filter((item): item is string => typeof item === "string")
+          : undefined,
+      })
+
+      const seenPairs = new Set<string>()
+      const removedIds = new Set<string>()
+      const found: Array<{ kept: string; removed: string; score: number }> = []
+      const kept = new Set<string>()
+      const removed: string[] = []
+
+      for (const memory of memories) {
+        if (removedIds.has(memory.id)) {
+          continue
+        }
+
+        const results = await manager.search(memory.data, {
+          topK: Math.min(Math.max(2, memories.length), memories.length),
+          user_id: userId,
+          session_id: typeof input.sessionId === "string" ? input.sessionId : ctx?.sessionKey ?? config.sessionId,
+          categories: Array.isArray(input.categories)
+            ? input.categories.filter((item): item is string => typeof item === "string")
+            : undefined,
+        })
+
+        const duplicate = results.find((result) => result.fact.id !== memory.id && result.score >= threshold && !removedIds.has(result.fact.id))
+        if (!duplicate) {
+          continue
+        }
+
+        const pairKey = [memory.id, duplicate.fact.id].sort().join(":")
+        if (seenPairs.has(pairKey)) {
+          continue
+        }
+        seenPairs.add(pairKey)
+
+        const [older, newer] = memory.created_at <= duplicate.fact.created_at
+          ? [memory, duplicate.fact]
+          : [duplicate.fact, memory]
+
+        kept.add(older.id)
+        removedIds.add(newer.id)
+        removed.push(newer.id)
+        found.push({ kept: older.id, removed: newer.id, score: duplicate.score })
+
+        if (!dryRun) {
+          await manager.delete(newer.id)
+        }
+      }
+
+      return {
+        found: found.length,
+        removed: dryRun ? 0 : removed.length,
+        kept: Array.from(kept),
+        removedIds: removed,
+        duplicates: found,
+      }
+    }, { found: 0, removed: 0, kept: [], removedIds: [], duplicates: [] })
   }
 
   async function beforePromptBuild(event: { prompt?: string }, ctx: RuntimeContext = {}) {
@@ -708,6 +804,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     add,
     remove,
     list,
+    dedupe,
     beforePromptBuild,
     agentEnd,
     beforeReset,
@@ -817,6 +914,13 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
           return runtime.list(input, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
         },
       },
+      {
+        name: "memory_dedupe",
+        async execute(input: ToolInput, context: LegacyHookContext) {
+          const { runtime } = getRuntime(context)
+          return runtime.dedupe(input, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
+        },
+      },
     ],
   }
 }
@@ -900,6 +1004,25 @@ export default definePluginEntry({
       },
       async execute(_toolCallId: string, input: unknown) {
         return runtime.list((input ?? {}) as ToolInput, { logger, sessionKey: ctx.sessionKey, agentId: ctx.agentId })
+      },
+    })) as unknown as Parameters<typeof api.registerTool>[0])
+
+    api.registerTool(((ctx: OpenClawPluginToolContext) => ({
+      name: "memory_dedupe",
+      label: "Deduplicate memories",
+      description: "Find and remove near-duplicate memories",
+      parameters: {
+        type: "object",
+        properties: {
+          threshold: { type: "number" },
+          dryRun: { type: "boolean" },
+          userId: { type: "string" },
+          sessionId: { type: "string" },
+          categories: { type: "array", items: { type: "string" } },
+        },
+      },
+      async execute(_toolCallId: string, input: unknown) {
+        return runtime.dedupe((input ?? {}) as ToolInput, { logger, sessionKey: ctx.sessionKey, agentId: ctx.agentId })
       },
     })) as unknown as Parameters<typeof api.registerTool>[0])
 

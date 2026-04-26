@@ -1,7 +1,8 @@
 import { describe, expect, it, jest } from "@jest/globals"
 
 import { captureInChunks, createPlugin } from "../src/index.js"
-import type { Embedder, LLMExtractor, Message, PluginConfig, SessionCaptureState, StorageProvider } from "../src/types.js"
+import type { Embedder, FactPayload, Filters, LLMExtractor, Message, PluginConfig, SearchResult, SessionCaptureState, StorageProvider } from "../src/types.js"
+import { cosineSimilarity } from "../src/utils.js"
 import { MockEmbedder, InMemoryStorageProvider } from "./helpers.js"
 
 class TestExtractor {
@@ -80,6 +81,104 @@ class ChunkRecordingExtractor implements LLMExtractor {
       throw new Error("chunk failed")
     }
     return [`Fact: ${conversation.map((message) => message.content).join(" | ")}`]
+  }
+}
+
+class SemanticToolEmbedder implements Embedder {
+  public readonly dimensions = 3
+
+  public async embed(text: string): Promise<number[]> {
+    const vectors: Record<string, number[]> = {
+      "User likes tea": [1, 0, 0],
+      "User loves tea": [0.95, Math.sqrt(1 - 0.95 ** 2), 0],
+      "User has a dog": [0, 1, 0],
+    }
+
+    return vectors[text] ?? [0, 0, 1]
+  }
+}
+
+class DuplicateFriendlyStorageProvider implements StorageProvider {
+  public readonly records = new Map<string, { payload: FactPayload; vector: number[] }>()
+  private readonly sessionState = new Map<string, SessionCaptureState>()
+
+  public async init(): Promise<void> {}
+
+  public async insert(id: string, vector: number[], payload: FactPayload): Promise<void> {
+    this.records.set(id, { payload, vector })
+  }
+
+  public async search(vector: number[], topK: number, filters: Filters = {}): Promise<SearchResult[]> {
+    return Array.from(this.records.values())
+      .filter(({ payload }) => {
+        if (filters.user_id && payload.user_id !== filters.user_id) {
+          return false
+        }
+        if (filters.session_id && payload.session_id !== filters.session_id) {
+          return false
+        }
+        if (filters.categories?.length) {
+          const payloadCategories = payload.categories ?? []
+          return filters.categories.every((category) => payloadCategories.includes(category))
+        }
+        return true
+      })
+      .map(({ payload, vector: storedVector }) => ({
+        fact: payload,
+        score: cosineSimilarity(vector, storedVector),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+  }
+
+  public async get(id: string): Promise<FactPayload | null> {
+    return this.records.get(id)?.payload ?? null
+  }
+
+  public async delete(id: string): Promise<void> {
+    this.records.delete(id)
+  }
+
+  public async list(filters: Filters = {}, topK?: number): Promise<FactPayload[]> {
+    const items = Array.from(this.records.values())
+      .map((value) => value.payload)
+      .filter((payload) => {
+        if (filters.user_id && payload.user_id !== filters.user_id) {
+          return false
+        }
+        if (filters.session_id && payload.session_id !== filters.session_id) {
+          return false
+        }
+        if (filters.categories?.length) {
+          const payloadCategories = payload.categories ?? []
+          return filters.categories.every((category) => payloadCategories.includes(category))
+        }
+        return true
+      })
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+
+    return topK ? items.slice(0, topK) : items
+  }
+
+  public async getSessionState(sessionKey: string): Promise<SessionCaptureState | null> {
+    return this.sessionState.get(sessionKey) ?? null
+  }
+
+  public async upsertWatermark(sessionKey: string, watermark: number): Promise<void> {
+    const existing = this.sessionState.get(sessionKey)
+    this.sessionState.set(sessionKey, {
+      ...existing,
+      watermark,
+      completedAt: null,
+    })
+  }
+
+  public async markCompleted(sessionKey: string): Promise<void> {
+    const existing = this.sessionState.get(sessionKey)
+    this.sessionState.set(sessionKey, {
+      watermark: existing?.watermark ?? 0,
+      completedAt: new Date().toISOString(),
+    })
   }
 }
 
@@ -191,6 +290,85 @@ describe("plugin entry", () => {
     const results = await searchTool?.execute({ query: "tea" }, { config, logger: { warn: jest.fn() } }) as Array<{ fact: { data: string } }>
 
     expect(results).toEqual([])
+  })
+
+  it("reports duplicates in memory_dedupe dry-run mode without deleting them", async () => {
+    const storage = new DuplicateFriendlyStorageProvider()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new SemanticToolEmbedder(),
+      createExtractor: () => new TestExtractor(),
+      devicePrefix: "testdevice01",
+    })
+    const addTool = plugin.tools.find((tool) => tool.name === "memory_add")
+    const dedupeTool = plugin.tools.find((tool) => tool.name === "memory_dedupe")
+    const context = {
+      config: buildConfig({ userId: undefined }),
+      sessionId: "agent:main:test:dedupe-dry-run",
+      agentId: "main",
+      logger: { warn: jest.fn() },
+    }
+
+    const first = await addTool?.execute({ text: "User likes tea" }, context) as { id: string }
+    const second = await addTool?.execute({ text: "User loves tea" }, context) as { id: string }
+    storage.records.get(first.id)!.payload.created_at = "2026-04-26T10:00:00.000Z"
+    storage.records.get(second.id)!.payload.created_at = "2026-04-26T10:00:01.000Z"
+
+    const result = await dedupeTool?.execute({ dryRun: true, threshold: 0.92 }, context) as {
+      found: number
+      removed: number
+      kept: string[]
+      removedIds: string[]
+    }
+
+    expect(result).toMatchObject({
+      found: 1,
+      removed: 0,
+      kept: [first.id],
+      removedIds: [second.id],
+    })
+    expect(await storage.list({ user_id: "testdevice01:main" })).toHaveLength(2)
+  })
+
+  it("removes the newer duplicate in memory_dedupe", async () => {
+    const storage = new DuplicateFriendlyStorageProvider()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new SemanticToolEmbedder(),
+      createExtractor: () => new TestExtractor(),
+      devicePrefix: "testdevice01",
+    })
+    const addTool = plugin.tools.find((tool) => tool.name === "memory_add")
+    const dedupeTool = plugin.tools.find((tool) => tool.name === "memory_dedupe")
+    const listTool = plugin.tools.find((tool) => tool.name === "memory_list")
+    const context = {
+      config: buildConfig({ userId: undefined }),
+      sessionId: "agent:main:test:dedupe-live",
+      agentId: "main",
+      logger: { warn: jest.fn() },
+    }
+
+    const first = await addTool?.execute({ text: "User likes tea" }, context) as { id: string }
+    const second = await addTool?.execute({ text: "User loves tea" }, context) as { id: string }
+    storage.records.get(first.id)!.payload.created_at = "2026-04-26T10:00:00.000Z"
+    storage.records.get(second.id)!.payload.created_at = "2026-04-26T10:00:01.000Z"
+
+    const result = await dedupeTool?.execute({ threshold: 0.92 }, context) as {
+      found: number
+      removed: number
+      kept: string[]
+      removedIds: string[]
+    }
+    const remaining = await listTool?.execute({}, context) as Array<{ id: string; data: string }>
+
+    expect(result).toMatchObject({
+      found: 1,
+      removed: 1,
+      kept: [first.id],
+      removedIds: [second.id],
+    })
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0]).toMatchObject({ id: first.id, data: "User likes tea" })
   })
 })
 
