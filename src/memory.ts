@@ -9,7 +9,7 @@ import type {
   SearchResult,
   StorageProvider,
 } from "./types.js"
-import { createFactPayload } from "./utils.js"
+import { cosineSimilarity, createFactPayload } from "./utils.js"
 
 export interface MemoryManagerConfig {
   userId: string
@@ -34,6 +34,8 @@ export class MemoryManager {
   public async capture(conversation: Message[], options: CaptureOptions = {}): Promise<FactPayload[]> {
     const facts = await this.extractor.extract(conversation)
     const created: FactPayload[] = []
+    const sessionCache = options.sessionVectorCache ?? []
+    const deduplicationThreshold = this.config.deduplicationThreshold ?? 0.92
 
     for (const factText of facts) {
       const payload = createFactPayload(
@@ -43,15 +45,30 @@ export class MemoryManager {
         options.categories ?? this.config.categories,
       )
       const vector = await this.embedder.embed(payload.data)
+
+      const inSessionCache = sessionCache.some((entry) => {
+        if (entry.hash === payload.hash) {
+          return true
+        }
+
+        return cosineSimilarity(entry.vector, vector) >= deduplicationThreshold
+      })
+
+      if (inSessionCache) {
+        continue
+      }
+
       const similar = await this.storage.search(vector, 1, {
         user_id: options.userId ?? this.config.userId,
       })
 
-      if (similar.length > 0 && similar[0].score >= (this.config.deduplicationThreshold ?? 0.92)) {
+      if (similar.length > 0 && similar[0].score >= deduplicationThreshold) {
+        sessionCache.push({ hash: payload.hash, vector })
         continue
       }
 
       await this.storage.insert(payload.id, vector, payload)
+      sessionCache.push({ hash: payload.hash, vector })
       const stored = await this.storage.get(payload.id)
       created.push(stored ?? payload)
     }
