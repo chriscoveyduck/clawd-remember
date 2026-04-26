@@ -48,15 +48,6 @@ export interface SqliteStorageConfig {
   path?: string
 }
 
-export interface MariaDbStorageConfig {
-  host: string
-  port?: number
-  user: string
-  password: string
-  database: string
-  table?: string
-}
-
 export interface OllamaEmbedderConfig {
   url: string
   model: string
@@ -71,33 +62,25 @@ export interface OpenAICompatibleConfig {
 }
 
 export interface PluginConfig {
-  storage:
-    | {
-      provider: "sqlite"
-      config: SqliteStorageConfig
-    }
-    | {
-      provider: "mariadb"
-      config: MariaDbStorageConfig
-    }
-  embedder: {
-    provider: "ollama"
-    config: OllamaEmbedderConfig
+  storage: {
+    provider: "sqlite"
+    config: SqliteStorageConfig
   }
-  llm:
+  embedder:
     | {
-        provider: "openai-compatible"
+        provider: "ollama"
+        config: OllamaEmbedderConfig
+      }
+    | {
+        provider: "openai"
         config: OpenAICompatibleConfig
       }
-    | {
-        provider: "github-copilot"
-        config: {
-          model?: string
-          tokenPath?: string
-          timeoutMs?: number
-        }
-      }
-  /** Optional override for the agent name portion of the partition key (Level 2). */
+  llm: {
+    provider: "openai-compatible"
+    config: OpenAICompatibleConfig
+  }
+  /** Optional override for the agent name portion of the partition key (Level 2).
+   * When omitted, the partition key is auto-derived from the session/agent context. */
   userId?: string
   sessionId?: string
   autoRecall?: boolean

@@ -66,11 +66,19 @@ export class SqliteStorageProvider implements StorageProvider {
           embedding FLOAT
         );
       `)
-    } catch {
+    } catch (vecErr) {
+      // Flexible-dimension form not supported by this sqlite-vec version; fall back to fixed dimensions
+      const dims = this.config.dimensions ?? 1536
+      // Log the fallback so silent failures are visible during debugging
+      const warnMsg = `[clawd-remember] sqlite-vec: flexible embedding column not supported, retrying with fixed dimensions ${dims}: ${vecErr instanceof Error ? vecErr.message : String(vecErr)}`
+      if (typeof console !== 'undefined') {
+        // eslint-disable-next-line no-console
+        console.warn(warnMsg)
+      }
       db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
           id TEXT PRIMARY KEY,
-          embedding FLOAT[${this.config.dimensions ?? 1536}]
+          embedding FLOAT[${dims}]
         );
       `)
     }
