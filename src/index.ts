@@ -8,7 +8,15 @@ import { OllamaEmbedder } from "./embedders/ollama.js"
 import { OpenAIEmbedder } from "./embedders/openai.js"
 import { OpenAICompatibleExtractor } from "./extractors/openai.js"
 import { SqliteStorageProvider } from "./storage/sqlite.js"
-import type { Embedder, LLMExtractor, Message, PluginConfig, RecallOptions, StorageProvider } from "./types.js"
+import type {
+  CaptureOptions,
+  Embedder,
+  LLMExtractor,
+  Message,
+  PluginConfig,
+  RecallOptions,
+  StorageProvider,
+} from "./types.js"
 import { withTimeout } from "./utils.js"
 
 type LoggerLike = {
@@ -114,8 +122,9 @@ async function createManager(
   config: PluginConfig,
   logger?: LoggerLike,
   dependencies: PluginDependencies = {},
+  storage?: StorageProvider,
 ): Promise<MemoryManager> {
-  const storage = (dependencies.createStorageProvider ?? createStorageProvider)(config)
+  const resolvedStorage = storage ?? (dependencies.createStorageProvider ?? createStorageProvider)(config)
   const embedder = (dependencies.createEmbedder ?? createEmbedder)(config)
   const extractor = (dependencies.createExtractor ?? ((currentConfig) => {
     if (currentConfig.llm.provider !== "openai-compatible") {
@@ -123,7 +132,7 @@ async function createManager(
     }
     return new OpenAICompatibleExtractor(currentConfig.llm.config)
   }))(config)
-  const manager = new MemoryManager(storage, embedder, extractor, {
+  const manager = new MemoryManager(resolvedStorage, embedder, extractor, {
     userId: config.userId ?? "default",
     sessionId: config.sessionId,
     categories: config.categories,
@@ -140,6 +149,26 @@ async function createManager(
     throw wrapped
   }
   return manager
+}
+
+export async function captureInChunks(
+  manager: Pick<MemoryManager, "capture">,
+  messages: Message[],
+  options: CaptureOptions,
+  chunkSize = 20,
+  onChunkSuccess?: (chunk: Message[], chunkFactsCaptured: number) => Promise<void> | void,
+): Promise<number> {
+  const normalizedChunkSize = Math.max(1, Math.floor(chunkSize))
+  let totalCaptured = 0
+
+  for (let start = 0; start < messages.length; start += normalizedChunkSize) {
+    const chunk = messages.slice(start, start + normalizedChunkSize)
+    const facts = await manager.capture(chunk, options)
+    totalCaptured += facts.length
+    await onChunkSuccess?.(chunk, facts.length)
+  }
+
+  return totalCaptured
 }
 
 function createStorageProvider(config: PluginConfig): SqliteStorageProvider {
@@ -290,6 +319,7 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     topK: config?.topK ?? 10,
     recallTimeout: config?.recallTimeout ?? 10_000,
     captureTimeout: config?.captureTimeout ?? 15_000,
+    chunkSize: config?.chunkSize ?? 20,
     categories: config?.categories,
     useConversationAccess: config?.useConversationAccess ?? false,
   }
@@ -361,6 +391,7 @@ export const configSchema = {
     topK: { type: "number" },
     recallTimeout: { type: "number" },
     captureTimeout: { type: "number" },
+    chunkSize: { type: "number" },
     categories: {
       type: "array",
       items: { type: "string" },
@@ -371,7 +402,8 @@ export const configSchema = {
 
 function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dependencies: PluginDependencies = {}) {
   let managerPromise: Promise<MemoryManager> | null = null
-  const processedSessionIds = new Set<string>()
+  let storagePromise: Promise<StorageProvider> | null = null
+  const compactionPending = new Set<string>()
 
   // Load device prefix once at startup. Cached as a promise so all callers await the same result.
   const devicePrefixPromise: Promise<string> = dependencies.devicePrefix !== undefined
@@ -380,9 +412,86 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
 
   function getManager(): Promise<MemoryManager> {
     if (!managerPromise) {
-      managerPromise = createManager(config, logger, dependencies)
+      managerPromise = (async () => createManager(config, logger, dependencies, await getStorage()))()
     }
     return managerPromise
+  }
+
+  function getStorage(): Promise<StorageProvider> {
+    if (!storagePromise) {
+      storagePromise = Promise.resolve((dependencies.createStorageProvider ?? createStorageProvider)(config))
+    }
+    return storagePromise
+  }
+
+  function resolveSessionKey(ctx: RuntimeContext, fallback?: string): string | undefined {
+    return ctx.sessionKey ?? fallback ?? config.sessionId
+  }
+
+  async function captureSessionDelta(
+    scope: string,
+    messages: Message[],
+    ctx: RuntimeContext,
+    options: { markCompleted?: boolean; forceWatermarkToLength?: boolean } = {},
+  ): Promise<number | undefined> {
+    if (!messages.length) {
+      return 0
+    }
+
+    const sessionKey = resolveSessionKey(ctx)
+    const storage = await getStorage()
+    const state = sessionKey ? await storage.getSessionState(sessionKey) : null
+    if (state?.completedAt) {
+      return 0
+    }
+
+    const watermark = Math.min(state?.watermark ?? 0, messages.length)
+    const delta = messages.slice(watermark)
+    if (!delta.length) {
+      if (options.forceWatermarkToLength && sessionKey) {
+        await storage.upsertWatermark(sessionKey, messages.length)
+      }
+      if (options.markCompleted && sessionKey) {
+        await storage.markCompleted(sessionKey)
+      }
+      return 0
+    }
+
+    const manager = await getManager()
+    const devicePrefix = await devicePrefixPromise
+    const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
+    let nextWatermark = watermark
+    const totalFacts = await withTimeout(
+      captureInChunks(
+        manager,
+        delta,
+        {
+          userId: partitionKey,
+          sessionId: sessionKey,
+          categories: config.categories,
+        },
+        config.chunkSize ?? 20,
+        async (chunk) => {
+          nextWatermark += chunk.length
+          if (sessionKey) {
+            await storage.upsertWatermark(sessionKey, nextWatermark)
+          }
+        },
+      ),
+      config.captureTimeout ?? 15_000,
+      scope,
+    )
+
+    if (options.forceWatermarkToLength && sessionKey && nextWatermark !== messages.length) {
+      await storage.upsertWatermark(sessionKey, messages.length)
+    }
+
+    if (options.markCompleted && sessionKey) {
+      await storage.markCompleted(sessionKey)
+    }
+
+    logger?.info?.(`[clawd-remember] ${scope}: captured ${totalFacts} facts for user ${partitionKey}`)
+    return totalFacts
   }
 
   async function search(input: ToolInput, ctx: ToolContext = {}) {
@@ -489,53 +598,22 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
       return
     }
 
-    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "agent_end", async () => {
       const messages = normalizeMessages(event.messages)
-      if (!messages.length) {
-        return
-      }
-
-      const manager = await getManager()
-      const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
-      const facts = await withTimeout(
-        manager.capture(messages, {
-          userId: partitionKey,
-          sessionId: ctx?.sessionKey ?? config.sessionId,
-          categories: config.categories,
-        }),
-        config.captureTimeout ?? 15_000,
-        "memory capture",
-      )
-      logger?.info?.(`[clawd-remember] captured ${facts.length} facts for user ${partitionKey}`)
+      await captureSessionDelta("agent_end", messages, ctx)
     }, undefined)
   }
 
   async function beforeReset(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
-    const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "before_reset", async () => {
       const messages = normalizeMessages(event.messages)
-      if (!messages.length) return
-      const sessionKey = ctx.sessionKey ?? ""
-      if (sessionKey) processedSessionIds.add(sessionKey)
-      const manager = await getManager()
-      const facts = await withTimeout(
-        manager.capture(messages, {
-          userId: resolvePartitionKey(devicePrefix, ctx, config),
-          sessionId: sessionKey || config.sessionId,
-          categories: config.categories,
-        }),
-        config.captureTimeout ?? 15_000,
-        "memory capture (before_reset)",
-      )
-      logger?.info?.(`[clawd-remember] before_reset: captured ${facts.length} facts`)
+      await captureSessionDelta("before_reset", messages, ctx, { markCompleted: true })
     }, undefined)
   }
 
   async function sessionEnd(event: { sessionFile?: string; sessionId: string; reason?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
-    if (processedSessionIds.has(event.sessionId)) return
     const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "session_end", async () => {
       if (!event.sessionFile) return
@@ -559,42 +637,48 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
         } catch { /* skip malformed lines */ }
       }
       if (!messages.length) return
-      processedSessionIds.add(event.sessionId)
-      const manager = await getManager()
-      const facts = await withTimeout(
-        manager.capture(messages, {
-          userId: resolvePartitionKey(devicePrefix, ctx, config),
-          sessionId: ctx.sessionKey ?? config.sessionId,
-          categories: config.categories,
-        }),
-        config.captureTimeout ?? 15_000,
-        "memory capture (session_end)",
+      const sessionKey = resolveSessionKey(ctx, event.sessionId)
+      const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
+      const totalFacts = await captureSessionDelta(
+        `session_end (${event.reason ?? "unknown"})`,
+        messages,
+        { ...ctx, sessionKey },
+        { markCompleted: true },
       )
-      logger?.info?.(`[clawd-remember] session_end (${event.reason ?? "unknown"}): captured ${facts.length} facts`)
+      if (typeof totalFacts === "number") {
+        logger?.info?.(`[clawd-remember] session_end (${event.reason ?? "unknown"}): captured ${totalFacts} facts for user ${partitionKey}`)
+      }
     }, undefined)
   }
 
   async function beforeCompaction(event: { messages?: unknown; sessionFile?: string }, ctx: RuntimeContext = {}) {
     if (!config.autoCapture) return
-    // Dedup guard: skip if this session was already processed by before_reset or session_end
-    const sessionKey = ctx.sessionKey ?? ""
-    if (sessionKey && processedSessionIds.has(sessionKey)) return
     const devicePrefix = await devicePrefixPromise
     return safeRun({ ...ctx, logger }, "before_compaction", async () => {
       const messages = normalizeMessages(event.messages)
       if (!messages.length) return
-      if (sessionKey) processedSessionIds.add(sessionKey)
-      const manager = await getManager()
-      const facts = await withTimeout(
-        manager.capture(messages, {
-          userId: resolvePartitionKey(devicePrefix, ctx, config),
-          sessionId: ctx.sessionKey ?? config.sessionId,
-          categories: config.categories,
-        }),
-        config.captureTimeout ?? 15_000,
-        "memory capture (before_compaction)",
-      )
-      logger?.info?.(`[clawd-remember] before_compaction: captured ${facts.length} facts`)
+      const sessionKey = resolveSessionKey(ctx)
+      const partitionKey = resolvePartitionKey(devicePrefix, ctx, config)
+      const totalFacts = await captureSessionDelta("before_compaction", messages, ctx, { forceWatermarkToLength: true })
+      if (sessionKey) {
+        compactionPending.add(sessionKey)
+      }
+      if (typeof totalFacts === "number") {
+        logger?.info?.(`[clawd-remember] before_compaction: captured ${totalFacts} facts for user ${partitionKey}`)
+      }
+    }, undefined)
+  }
+
+  async function afterCompaction(_event: Record<string, never>, ctx: RuntimeContext = {}) {
+    const sessionKey = resolveSessionKey(ctx)
+    if (!sessionKey || !compactionPending.has(sessionKey)) {
+      return
+    }
+
+    return safeRun({ ...ctx, logger }, "after_compaction", async () => {
+      const storage = await getStorage()
+      await storage.upsertWatermark(sessionKey, 0)
+      compactionPending.delete(sessionKey)
     }, undefined)
   }
 
@@ -608,6 +692,7 @@ function createRuntime(config: PluginConfig, logger: LoggerLike | undefined, dep
     beforeReset,
     sessionEnd,
     beforeCompaction,
+    afterCompaction,
   }
 }
 
@@ -650,6 +735,35 @@ export function createPlugin(dependencies: PluginDependencies = {}) {
           { messages: context.conversation ?? context.messages ?? [], success: (context as { success?: boolean }).success },
           { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId },
         )
+        return context
+      },
+      async before_reset(context: LegacyHookContext) {
+        const { runtime } = getRuntime(context)
+        await runtime.beforeReset(
+          { messages: context.conversation ?? context.messages ?? [] },
+          { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId },
+        )
+        return context
+      },
+      async session_end(context: LegacyHookContext & { sessionFile?: string; reason?: string }) {
+        const { runtime } = getRuntime(context)
+        await runtime.sessionEnd(
+          { sessionFile: context.sessionFile, sessionId: context.sessionId ?? "", reason: context.reason },
+          { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId },
+        )
+        return context
+      },
+      async before_compaction(context: LegacyHookContext) {
+        const { runtime } = getRuntime(context)
+        await runtime.beforeCompaction(
+          { messages: context.conversation ?? context.messages ?? [] },
+          { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId },
+        )
+        return context
+      },
+      async after_compaction(context: LegacyHookContext) {
+        const { runtime } = getRuntime(context)
+        await runtime.afterCompaction({}, { logger: context.logger, sessionKey: context.sessionId, agentId: context.agentId })
         return context
       },
     },
@@ -785,6 +899,9 @@ export default definePluginEntry({
       })
       api.on("before_compaction", async (event, ctx) => {
         return runtime.beforeCompaction(event as { messages?: unknown; sessionFile?: string }, ctx)
+      })
+      api.on("after_compaction", async (_event, ctx) => {
+        return runtime.afterCompaction({}, ctx)
       })
     }
   },

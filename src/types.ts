@@ -25,6 +25,11 @@ export interface SearchResult {
   score: number
 }
 
+export interface SessionCaptureState {
+  watermark: number
+  completedAt: string | null
+}
+
 export interface StorageProvider {
   init(): Promise<void>
   insert(id: string, vector: number[], payload: FactPayload): Promise<void>
@@ -32,6 +37,9 @@ export interface StorageProvider {
   get(id: string): Promise<FactPayload | null>
   delete(id: string): Promise<void>
   list(filters?: Filters, topK?: number): Promise<FactPayload[]>
+  getSessionState(sessionKey: string): Promise<SessionCaptureState | null>
+  upsertWatermark(sessionKey: string, watermark: number): Promise<void>
+  markCompleted(sessionKey: string): Promise<void>
 }
 
 export interface Embedder {
@@ -88,6 +96,7 @@ export interface PluginConfig {
   topK?: number
   recallTimeout?: number
   captureTimeout?: number
+  chunkSize?: number
   categories?: string[]
   useConversationAccess?: boolean
 }

@@ -40,6 +40,26 @@ maybeDescribe("SqliteStorageProvider", () => {
     await provider.delete(payload1.id)
     expect(await provider.get(payload1.id)).toBeNull()
   })
+
+  it("persists session capture state", async () => {
+    const provider = new SqliteStorageProvider({
+      path: join(dir, "state.db"),
+    })
+    await provider.init()
+
+    expect(await provider.getSessionState("session-1")).toBeNull()
+
+    await provider.upsertWatermark("session-1", 12)
+    expect(await provider.getSessionState("session-1")).toEqual({
+      watermark: 12,
+      completedAt: null,
+    })
+
+    await provider.markCompleted("session-1")
+    const state = await provider.getSessionState("session-1")
+    expect(state?.watermark).toBe(12)
+    expect(state?.completedAt).toEqual(expect.any(String))
+  })
 })
 
 async function canRunSqlite(): Promise<boolean> {
@@ -62,4 +82,3 @@ async function canRunSqlite(): Promise<boolean> {
     return false
   }
 }
-

@@ -1,4 +1,13 @@
-import type { Embedder, FactPayload, Filters, LLMExtractor, Message, SearchResult, StorageProvider } from "../src/types.js"
+import type {
+  Embedder,
+  FactPayload,
+  Filters,
+  LLMExtractor,
+  Message,
+  SearchResult,
+  SessionCaptureState,
+  StorageProvider,
+} from "../src/types.js"
 import { cosineSimilarity } from "../src/utils.js"
 
 export class MockEmbedder implements Embedder {
@@ -20,6 +29,7 @@ export class MockExtractor implements LLMExtractor {
 
 export class InMemoryStorageProvider implements StorageProvider {
   private readonly store = new Map<string, { payload: FactPayload; vector: number[] }>()
+  private readonly sessionState = new Map<string, SessionCaptureState>()
 
   public async init(): Promise<void> {}
 
@@ -87,5 +97,26 @@ export class InMemoryStorageProvider implements StorageProvider {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
 
     return topK ? items.slice(0, topK) : items
+  }
+
+  public async getSessionState(sessionKey: string): Promise<SessionCaptureState | null> {
+    return this.sessionState.get(sessionKey) ?? null
+  }
+
+  public async upsertWatermark(sessionKey: string, watermark: number): Promise<void> {
+    const existing = this.sessionState.get(sessionKey)
+    this.sessionState.set(sessionKey, {
+      ...existing,
+      watermark,
+      completedAt: null,
+    })
+  }
+
+  public async markCompleted(sessionKey: string): Promise<void> {
+    const existing = this.sessionState.get(sessionKey)
+    this.sessionState.set(sessionKey, {
+      watermark: existing?.watermark ?? 0,
+      completedAt: new Date().toISOString(),
+    })
   }
 }

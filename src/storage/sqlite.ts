@@ -1,6 +1,13 @@
 import type { Database as BetterSqlite3Database, Statement } from "better-sqlite3"
 
-import type { FactPayload, Filters, SearchResult, SqliteStorageConfig, StorageProvider } from "../types.js"
+import type {
+  FactPayload,
+  Filters,
+  SearchResult,
+  SessionCaptureState,
+  SqliteStorageConfig,
+  StorageProvider,
+} from "../types.js"
 import {
   DEFAULT_SQLITE_PATH,
   bufferToVector,
@@ -56,6 +63,15 @@ export class SqliteStorageProvider implements StorageProvider {
         id TEXT PRIMARY KEY,
         vector BLOB NOT NULL,
         payload TEXT NOT NULL
+      );
+    `)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session_capture_state (
+        session_key TEXT PRIMARY KEY,
+        watermark INTEGER NOT NULL DEFAULT 0,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
     `)
 
@@ -227,6 +243,49 @@ export class SqliteStorageProvider implements StorageProvider {
     `).all(...params) as Array<{ id: string; payload: string }>
 
     return rows.map((row) => JSON.parse(row.payload) as FactPayload)
+  }
+
+  public async getSessionState(sessionKey: string): Promise<SessionCaptureState | null> {
+    const db = this.getDb()
+    const row = db.prepare(`
+      SELECT watermark, completed_at
+      FROM session_capture_state
+      WHERE session_key = ?
+    `).get(sessionKey) as { watermark: number; completed_at: string | null } | undefined
+
+    if (!row) {
+      return null
+    }
+
+    return {
+      watermark: row.watermark,
+      completedAt: row.completed_at,
+    }
+  }
+
+  public async upsertWatermark(sessionKey: string, watermark: number): Promise<void> {
+    const db = this.getDb()
+    const now = new Date().toISOString()
+    db.prepare(`
+      INSERT INTO session_capture_state (session_key, watermark, completed_at, created_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?)
+      ON CONFLICT(session_key) DO UPDATE SET
+        watermark = excluded.watermark,
+        completed_at = NULL,
+        updated_at = excluded.updated_at
+    `).run(sessionKey, watermark, now, now)
+  }
+
+  public async markCompleted(sessionKey: string): Promise<void> {
+    const db = this.getDb()
+    const now = new Date().toISOString()
+    db.prepare(`
+      INSERT INTO session_capture_state (session_key, watermark, completed_at, created_at, updated_at)
+      VALUES (?, 0, ?, ?, ?)
+      ON CONFLICT(session_key) DO UPDATE SET
+        completed_at = excluded.completed_at,
+        updated_at = excluded.updated_at
+    `).run(sessionKey, now, now, now)
   }
 
   private getDb(): BetterSqlite3Database {

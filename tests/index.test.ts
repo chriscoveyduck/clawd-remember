@@ -1,7 +1,7 @@
 import { describe, expect, it, jest } from "@jest/globals"
 
-import { createPlugin } from "../src/index.js"
-import type { Embedder, LLMExtractor, Message, PluginConfig, StorageProvider } from "../src/types.js"
+import { captureInChunks, createPlugin } from "../src/index.js"
+import type { Embedder, LLMExtractor, Message, PluginConfig, SessionCaptureState, StorageProvider } from "../src/types.js"
 import { MockEmbedder, InMemoryStorageProvider } from "./helpers.js"
 
 class TestExtractor {
@@ -44,6 +44,42 @@ class ThrowingStorageProvider implements StorageProvider {
 
   public async list(): Promise<[]> {
     return []
+  }
+
+  public async getSessionState(): Promise<SessionCaptureState | null> {
+    return null
+  }
+
+  public async upsertWatermark(): Promise<void> {}
+
+  public async markCompleted(): Promise<void> {}
+}
+
+class RecordingStorageProvider extends InMemoryStorageProvider {
+  public readonly watermarkUpdates: Array<{ sessionKey: string; watermark: number }> = []
+  public readonly completedSessions: string[] = []
+
+  public override async upsertWatermark(sessionKey: string, watermark: number): Promise<void> {
+    this.watermarkUpdates.push({ sessionKey, watermark })
+    await super.upsertWatermark(sessionKey, watermark)
+  }
+
+  public override async markCompleted(sessionKey: string): Promise<void> {
+    this.completedSessions.push(sessionKey)
+    await super.markCompleted(sessionKey)
+  }
+}
+
+class ChunkRecordingExtractor implements LLMExtractor {
+  public readonly chunkSizes: number[] = []
+  public failAtChunk?: number
+
+  public async extract(conversation: Message[]): Promise<string[]> {
+    this.chunkSizes.push(conversation.length)
+    if (this.failAtChunk !== undefined && this.chunkSizes.length === this.failAtChunk) {
+      throw new Error("chunk failed")
+    }
+    return [`Fact: ${conversation.map((message) => message.content).join(" | ")}`]
   }
 }
 
@@ -267,6 +303,7 @@ describe("normalizeConfig", () => {
       topK: 10,
       recallTimeout: 10000,
       captureTimeout: 15000,
+      chunkSize: 20,
     })
   })
 
@@ -314,6 +351,7 @@ describe("normalizeConfig", () => {
       topK: 10,
       recallTimeout: 10000,
       captureTimeout: 15000,
+      chunkSize: 20,
     })
   })
 })
@@ -340,5 +378,167 @@ describe("message normalization", () => {
     })
 
     expect(extractor.seen).toEqual([{ role: "user", content: "hello" }])
+  })
+
+  it("captureInChunks processes messages in configured chunk sizes", async () => {
+    const extractor = new ChunkRecordingExtractor()
+    const storage = new InMemoryStorageProvider()
+    const manager = {
+      async capture(messages: Message[]) {
+        return extractor.extract(messages).then((facts) => facts.map((fact, index) => ({
+          id: `${index}`,
+          data: fact,
+          hash: fact,
+          user_id: "user-1",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })))
+      },
+    }
+
+    const total = await captureInChunks(
+      manager,
+      Array.from({ length: 45 }, (_, index) => ({ role: "user", content: `message-${index + 1}` })),
+      { userId: "user-1", sessionId: "session-1" },
+      20,
+    )
+
+    expect(total).toBe(3)
+    expect(extractor.chunkSizes).toEqual([20, 20, 5])
+    expect(await storage.getSessionState("session-1")).toBeNull()
+  })
+
+  it("agentEnd reads watermark and only captures the delta", async () => {
+    const storage = new RecordingStorageProvider()
+    await storage.upsertWatermark("agent:main:test:1", 2)
+    const extractor = new ChunkRecordingExtractor()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => extractor,
+      devicePrefix: "testdevice01",
+    })
+
+    await plugin.hooks.after_agent_turn({
+      config: buildConfig({ chunkSize: 2 }),
+      sessionId: "agent:main:test:1",
+      messages: [
+        { role: "user", content: "m1" },
+        { role: "assistant", content: "m2" },
+        { role: "user", content: "m3" },
+        { role: "assistant", content: "m4" },
+        { role: "user", content: "m5" },
+      ],
+      logger: { warn: jest.fn() },
+    })
+
+    expect(extractor.chunkSizes).toEqual([2, 1])
+    expect(storage.watermarkUpdates.map((item) => item.watermark)).toEqual([2, 4, 5])
+    const state = await storage.getSessionState("agent:main:test:1")
+    expect(state).toMatchObject({ watermark: 5, completedAt: null })
+  })
+
+  it("beforeReset marks the session completed after capture", async () => {
+    const storage = new RecordingStorageProvider()
+    const extractor = new ChunkRecordingExtractor()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => extractor,
+      devicePrefix: "testdevice01",
+    })
+
+    await plugin.hooks.before_reset({
+      config: buildConfig({ chunkSize: 2 }),
+      sessionId: "agent:main:test:2",
+      messages: [
+        { role: "user", content: "m1" },
+        { role: "assistant", content: "m2" },
+        { role: "user", content: "m3" },
+      ],
+      logger: { warn: jest.fn() },
+    })
+
+    expect(extractor.chunkSizes).toEqual([2, 1])
+    expect(storage.completedSessions).toEqual(["agent:main:test:2"])
+    const state = await storage.getSessionState("agent:main:test:2")
+    expect(state?.watermark).toBe(3)
+    expect(state?.completedAt).toEqual(expect.any(String))
+  })
+
+  it("beforeReset skips capture when the session is already completed", async () => {
+    const storage = new RecordingStorageProvider()
+    await storage.upsertWatermark("agent:main:test:3", 2)
+    await storage.markCompleted("agent:main:test:3")
+    const extractor = new ChunkRecordingExtractor()
+    const plugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => extractor,
+      devicePrefix: "testdevice01",
+    })
+
+    await plugin.hooks.before_reset({
+      config: buildConfig(),
+      sessionId: "agent:main:test:3",
+      messages: [
+        { role: "user", content: "m1" },
+        { role: "assistant", content: "m2" },
+        { role: "user", content: "m3" },
+      ],
+      logger: { warn: jest.fn() },
+    })
+
+    expect(extractor.chunkSizes).toEqual([])
+    expect(storage.completedSessions).toEqual(["agent:main:test:3"])
+    const state = await storage.getSessionState("agent:main:test:3")
+    expect(state).toMatchObject({ watermark: 2 })
+    expect(state?.completedAt).toEqual(expect.any(String))
+  })
+
+  it("compaction resets the watermark to 0 after the post-compaction callback", async () => {
+    const storage = new RecordingStorageProvider()
+    const handlers = new Map<string, (event: unknown, ctx: { sessionKey?: string; agentId?: string }) => Promise<unknown> | unknown>()
+    const pluginEntry = (await import("../src/index.js")).default
+
+    pluginEntry.register({
+      pluginConfig: buildConfig({ useConversationAccess: false, chunkSize: 2 }) as unknown as Record<string, unknown>,
+      logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+      registerTool: () => undefined,
+      on(event: string, handler: (event: unknown, ctx: { sessionKey?: string; agentId?: string }) => Promise<unknown> | unknown) {
+        handlers.set(event, handler)
+      },
+    } as never)
+
+    const runtimePlugin = createPlugin({
+      createStorageProvider: () => storage,
+      createEmbedder: () => new MockEmbedder(),
+      createExtractor: () => new ChunkRecordingExtractor(),
+      devicePrefix: "testdevice01",
+    })
+
+    await runtimePlugin.hooks.before_compaction({
+      config: buildConfig({ chunkSize: 2 }),
+      sessionId: "agent:main:test:4",
+      messages: [
+        { role: "user", content: "m1" },
+        { role: "assistant", content: "m2" },
+        { role: "user", content: "m3" },
+      ],
+      logger: { warn: jest.fn() },
+    })
+
+    const stateBeforeReset = await storage.getSessionState("agent:main:test:4")
+    expect(stateBeforeReset).toMatchObject({ watermark: 3, completedAt: null })
+
+    await runtimePlugin.hooks.after_compaction({
+      config: buildConfig({ chunkSize: 2 }),
+      sessionId: "agent:main:test:4",
+      logger: { warn: jest.fn() },
+    })
+
+    const stateAfterReset = await storage.getSessionState("agent:main:test:4")
+    expect(stateAfterReset).toMatchObject({ watermark: 0, completedAt: null })
+    expect(handlers.has("after_compaction")).toBe(true)
   })
 })
