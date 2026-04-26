@@ -104,7 +104,7 @@ export class SqliteStorageProvider implements StorageProvider {
 
   public async insert(id: string, vector: number[], payload: FactPayload): Promise<void> {
     const db = this.getDb()
-    const existingByHash = this.findByHash(payload.hash, payload.user_id, payload.session_id)
+    const existingByHash = this.findByHash(payload.hash, payload.user_id)
     const targetId = existingByHash?.id ?? id
     const existingPayload = existingByHash?.payload
     const nextPayload: FactPayload = {
@@ -309,25 +309,16 @@ export class SqliteStorageProvider implements StorageProvider {
     return { id: row.id, payload: JSON.parse(row.payload) as FactPayload }
   }
 
-  private findByHash(hash: string, userId: string, sessionId?: string): { id: string; payload: FactPayload } | null {
+  private findByHash(hash: string, userId: string): { id: string; payload: FactPayload } | null {
     const db = this.getDb()
-    const sessionClause = sessionId === undefined
-      ? `json_extract(payload, '$.session_id') IS NULL`
-      : `json_extract(payload, '$.session_id') = ?`
-    const params: unknown[] = [hash, userId]
-    if (sessionId !== undefined) {
-      params.push(sessionId)
-    }
-
     const sql = `
       SELECT id, payload
       FROM memories
       WHERE json_extract(payload, '$.hash') = ?
         AND json_extract(payload, '$.user_id') = ?
-        AND ${sessionClause}
       LIMIT 1
     `
-    const row = db.prepare(sql).get(...params) as { id: string; payload: string } | undefined
+    const row = db.prepare(sql).get(hash, userId) as { id: string; payload: string } | undefined
     if (!row) {
       return null
     }

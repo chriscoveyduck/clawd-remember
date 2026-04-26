@@ -137,6 +137,7 @@ async function createManager(
     sessionId: config.sessionId,
     categories: config.categories,
     topK: config.topK,
+    deduplicationThreshold: config.deduplicationThreshold,
   })
   try {
     await manager.init()
@@ -317,6 +318,7 @@ function normalizeConfig(config?: PluginConfig): PluginConfig {
     autoRecall: config?.autoRecall ?? true,
     autoCapture: config?.autoCapture ?? true,
     topK: config?.topK ?? 10,
+    deduplicationThreshold: config?.deduplicationThreshold,
     recallTimeout: config?.recallTimeout ?? 10_000,
     captureTimeout: config?.captureTimeout ?? 15_000,
     chunkSize: config?.chunkSize ?? 20,
@@ -389,6 +391,7 @@ export const configSchema = {
     autoCapture: { type: "boolean" },
     useConversationAccess: { type: "boolean" },
     topK: { type: "number" },
+    deduplicationThreshold: { type: "number" },
     recallTimeout: { type: "number" },
     captureTimeout: { type: "number" },
     chunkSize: { type: "number" },

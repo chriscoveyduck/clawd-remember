@@ -36,8 +36,7 @@ export class InMemoryStorageProvider implements StorageProvider {
   public async insert(id: string, vector: number[], payload: FactPayload): Promise<void> {
     const existing = Array.from(this.store.entries()).find(([, value]) =>
       value.payload.hash === payload.hash &&
-      value.payload.user_id === payload.user_id &&
-      value.payload.session_id === payload.session_id,
+      value.payload.user_id === payload.user_id,
     )
 
     const targetId = existing?.[0] ?? id
